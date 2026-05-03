@@ -85,4 +85,81 @@ export const api = {
 
   rfcMisses: (id: number) =>
     req<unknown[]>(`/risk/projects/${id}/rfc-misses`),
+
+  seedDemo: (id: number) =>
+    req<{ project_id: number; rfc_drawings: { id: number; drawing_no: string; rfc_due: string }[] }>(
+      `/risk/projects/${id}/seed-demo`,
+      { method: "POST" },
+    ),
+
+  simulateRfcMiss: (
+    id: number,
+    body: {
+      rfc_drawing_id: number;
+      days_overdue: number;
+      idle_crew: number;
+      crew_burdened_rate: number;
+    },
+  ) =>
+    req<{
+      before_score: number;
+      after_score: number;
+      delta: number;
+      idle_cost: number | null;
+      factors_before: FactorVector;
+      factors_after: FactorVector;
+    }>(`/risk/projects/${id}/simulate-rfc-miss`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  // Visibility policy
+  readVisibility: () =>
+    req<{
+      fields: { key: string; label: string }[];
+      roles: Role[];
+      policy: Record<Role, string[]>;
+      viewer_role: Role;
+    }>("/cfo/visibility-policy"),
+
+  writeVisibility: (rows: { role: Role; allowed_fields: string[] }[]) =>
+    req("/cfo/visibility-policy", { method: "PUT", body: JSON.stringify(rows) }),
+
+  // Messaging
+  sendMessage: (body: {
+    project_id: number;
+    thread_id?: number;
+    subject?: string;
+    body: string;
+    context: {
+      type: "activity" | "rfc" | "permit" | "none";
+      activity_id?: string;
+      rfc_drawing_id?: number;
+      permit_id?: number;
+    };
+  }) => req("/messages/", { method: "POST", body: JSON.stringify(body) }),
+
+  listThreads: (projectId: number) =>
+    req<Array<{
+      id: number;
+      subject: string;
+      created_at: string;
+      messages: Array<{
+        id: number;
+        sender_email: string;
+        body: string;
+        activity_id: string | null;
+        rfc_drawing_id: number | null;
+        permit_id: number | null;
+        created_at: string;
+      }>;
+    }>>(`/messages/threads?project_id=${projectId}`),
+};
+
+export type FactorVector = {
+  schedule: number;
+  rfc: number;
+  permit: number;
+  long_lead: number;
+  field_idle: number;
 };

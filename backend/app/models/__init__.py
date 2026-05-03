@@ -18,3 +18,4 @@ from app.models.risk import (  # noqa: F401
     WrapScoreSnapshot,
     DelayClaim,
 )
+from app.models.messaging import Message, MessageThread  # noqa: F401

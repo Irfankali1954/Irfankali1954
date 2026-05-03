@@ -62,6 +62,30 @@ def project_summary(
     return margin_mask.apply_visibility(summary, user.role)
 
 
+@router.get("/visibility-policy")
+def read_visibility_policy(
+    user: CurrentUser = Depends(require_role(*list(TechnicalRole))),
+) -> dict:
+    """Return the active per-role allowlist plus catalog metadata.
+
+    Anyone can read the *shape* of the policy (so they know what is
+    governable), but only the CFO can ``PUT`` changes.
+    """
+    pol = margin_mask.get_policy()
+    return {
+        "fields": [
+            {"key": f.value, "label": FinancialField.display(f)}
+            for f in FinancialField
+        ],
+        "roles": [r.value for r in TechnicalRole],
+        "policy": {
+            r.value: sorted(f.value for f in pol.fields_for(r))
+            for r in TechnicalRole
+        },
+        "viewer_role": user.role.value,
+    }
+
+
 @router.put(
     "/visibility-policy",
     dependencies=[Depends(require_role(TechnicalRole.CFO))],

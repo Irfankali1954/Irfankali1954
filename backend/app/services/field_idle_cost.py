@@ -35,6 +35,10 @@ WORKING_HOURS_PER_DAY = 10.0  # configurable per-project later
 
 def compute_idle_hours(rfc_due: datetime, until: datetime | None = None) -> float:
     until = until or datetime.now(timezone.utc)
+    if rfc_due.tzinfo is None:
+        rfc_due = rfc_due.replace(tzinfo=timezone.utc)
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
     if until <= rfc_due:
         return 0.0
     elapsed_days = (until - rfc_due).total_seconds() / 86_400.0

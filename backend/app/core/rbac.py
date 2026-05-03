@@ -93,16 +93,39 @@ DEFAULT_PERMISSIONS: dict[TechnicalRole, set[Permission]] = {
 # --- Visibility (CFO-managed) ----------------------------------------------
 
 class FinancialField(str, Enum):
-    """Financial fields that may be masked from any serialized payload."""
+    """Financial fields that may be masked from any serialized payload.
+
+    Each member is a *data class* the CFO can toggle independently per role.
+    """
     BUDGET_TOTAL = "budget_total"
     ACTUAL_COST = "actual_cost"
     UNIT_COST = "unit_cost"
     SUPPLIER_RATE = "supplier_rate"
-    MARGIN = "margin"
+    INTERNAL_MARGIN = "margin"           # alias kept as 'margin' for wire compat
     MARGIN_PERCENT = "margin_percent"
+    CONTINGENCY = "contingency"
     REVENUE = "revenue"
     FIELD_IDLE_COST = "field_idle_cost"
     DELAY_CLAIM_VALUE = "delay_claim_value"
+
+    @classmethod
+    def display(cls, f: "FinancialField") -> str:
+        return _DISPLAY.get(f, f.value)
+
+
+# Human-readable labels surfaced in the CFO Visibility editor UI.
+_DISPLAY = {
+    FinancialField.BUDGET_TOTAL: "Budget Total",
+    FinancialField.ACTUAL_COST: "Actual Cost",
+    FinancialField.UNIT_COST: "Unit Cost",
+    FinancialField.SUPPLIER_RATE: "Subcontractor Rates",
+    FinancialField.INTERNAL_MARGIN: "Internal Margin",
+    FinancialField.MARGIN_PERCENT: "Margin %",
+    FinancialField.CONTINGENCY: "Contingency Funds",
+    FinancialField.REVENUE: "Revenue",
+    FinancialField.FIELD_IDLE_COST: "Field Idle Cost",
+    FinancialField.DELAY_CLAIM_VALUE: "Delay Claim Value",
+}
 
 
 @dataclass(frozen=True)
@@ -130,7 +153,7 @@ def default_visibility_policy() -> VisibilityPolicy:
         allowed={
             TechnicalRole.ADMIN: frozenset(),  # Admin sees tech, not money
             TechnicalRole.CFO: all_fields,
-            TechnicalRole.PROJECT_DIRECTOR: all_fields - {FinancialField.MARGIN, FinancialField.MARGIN_PERCENT},
+            TechnicalRole.PROJECT_DIRECTOR: all_fields - {FinancialField.INTERNAL_MARGIN, FinancialField.MARGIN_PERCENT},
             TechnicalRole.EPC_MANAGER: cost_only,
             TechnicalRole.SITE_MANAGER: frozenset({FinancialField.FIELD_IDLE_COST}),
             TechnicalRole.CIVIL_ENGINEER: frozenset(),

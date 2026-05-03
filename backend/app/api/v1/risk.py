@@ -5,11 +5,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, db_session, require_permission
 from app.core.rbac import Permission
+from app.models.financial import CostItem, Project, RevenueItem
 from app.models.risk import IdleEvent, RFCDrawing, WrapScoreSnapshot
+from app.models.schedule import ScheduleActivity
 from app.schemas.risk import (
     FieldIdleCostBreakdown,
     IdleEventOut,
@@ -19,6 +22,30 @@ from app.schemas.risk import (
 from app.services import field_idle_cost, margin_mask, wrap_risk
 
 router = APIRouter()
+
+
+class SimulateRfcMissIn(BaseModel):
+    rfc_drawing_id: int
+    days_overdue: int = 7
+    idle_crew: int = 12
+    crew_burdened_rate: float = 120.0
+
+
+class FactorsOut(BaseModel):
+    schedule: float
+    rfc: float
+    permit: float
+    long_lead: float
+    field_idle: float
+
+
+class SimulationOut(BaseModel):
+    before_score: float
+    after_score: float
+    delta: float
+    idle_cost: float | None  # masked
+    factors_before: FactorsOut
+    factors_after: FactorsOut
 
 
 @router.get(
@@ -46,6 +73,137 @@ def latest_wrap_score(project_id: int, db: Session = Depends(db_session)) -> Wra
 def recompute_wrap_score(project_id: int, db: Session = Depends(db_session)) -> WrapScoreOut:
     snap = wrap_risk.compute(db, project_id)
     return WrapScoreOut.model_validate(snap)
+
+
+@router.post(
+    "/projects/{project_id}/seed-demo",
+    dependencies=[Depends(require_permission(Permission.RISK_RECALC))],
+)
+def seed_demo(project_id: int, db: Session = Depends(db_session)) -> dict:
+    """Idempotent demo seed so the Simulate Delay button has data to act on.
+
+    Creates a project, two RFC drawings, two cost items, two activities.
+    Real data wires in via :mod:`app.api.v1.erp` once Oracle/P6 are live.
+    """
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+
+    project = db.get(Project, project_id)
+    if project is None:
+        project = Project(
+            id=project_id,
+            code=f"DEMO-{project_id}",
+            name="Demo Combined-Cycle Plant",
+            cod_target=now + timedelta(days=540),
+            contract_type="EPC_LSTK",
+            contract_value=1_200_000_000,
+            budget_total=1_050_000_000,
+        )
+        db.add(project)
+        db.flush()
+
+    if db.query(RFCDrawing).filter(RFCDrawing.project_id == project_id).count() == 0:
+        db.add_all([
+            RFCDrawing(
+                project_id=project_id, drawing_no="X-102",
+                title="HRSG Foundation Reinforcement Plan",
+                discipline="civil", issuer_org="ExternalCivilCo",
+                rfc_due=now + timedelta(days=14),
+            ),
+            RFCDrawing(
+                project_id=project_id, drawing_no="E-310",
+                title="Switchyard Earthing Layout",
+                discipline="elec", issuer_org="ExternalElecCo",
+                rfc_due=now + timedelta(days=21),
+            ),
+        ])
+
+    if db.query(ScheduleActivity).filter(ScheduleActivity.project_id == project_id).count() == 0:
+        db.add_all([
+            ScheduleActivity(
+                project_id=project_id, activity_id="CIV-1040",
+                name="HRSG Foundation Pour", wbs="1.2.3",
+                planned_start=now + timedelta(days=20),
+                planned_finish=now + timedelta(days=35),
+                duration_days=15, predecessors=[], successors=["MEC-2010"],
+            ),
+            ScheduleActivity(
+                project_id=project_id, activity_id="MEC-2010",
+                name="HRSG Erection", wbs="2.1.1",
+                planned_start=now + timedelta(days=36),
+                planned_finish=now + timedelta(days=120),
+                duration_days=84, predecessors=["CIV-1040"], successors=[],
+            ),
+        ])
+
+    if db.query(CostItem).filter(CostItem.project_id == project_id).count() == 0:
+        db.add_all([
+            CostItem(project_id=project_id, wbs="1.2.3", description="Concrete & rebar",
+                     supplier="LocalConcreteCo", quantity=4500, unit_cost=180,
+                     actual_cost=810_000, supplier_rate=180),
+            CostItem(project_id=project_id, wbs="2.1.1", description="HRSG package",
+                     supplier="LongLeadVendor", quantity=1, unit_cost=120_000_000,
+                     actual_cost=0, supplier_rate=0),
+        ])
+    if db.query(RevenueItem).filter(RevenueItem.project_id == project_id).count() == 0:
+        db.add_all([
+            RevenueItem(project_id=project_id, milestone="Civil Substantial Completion",
+                        amount=300_000_000),
+            RevenueItem(project_id=project_id, milestone="HRSG Mechanical Completion",
+                        amount=600_000_000),
+        ])
+    db.commit()
+
+    rfcs = db.query(RFCDrawing).filter(RFCDrawing.project_id == project_id).all()
+    return {
+        "project_id": project_id,
+        "rfc_drawings": [{"id": r.id, "drawing_no": r.drawing_no, "rfc_due": r.rfc_due.isoformat()} for r in rfcs],
+    }
+
+
+@router.post(
+    "/projects/{project_id}/simulate-rfc-miss",
+    response_model=SimulationOut,
+    dependencies=[Depends(require_permission(Permission.RISK_RECALC))],
+)
+def simulate_rfc_miss(
+    project_id: int,
+    payload: SimulateRfcMissIn,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(require_permission(Permission.RISK_RECALC)),
+) -> SimulationOut:
+    """Synthetic RFC miss → IdleEvent → wrap score recompute.
+
+    The UI's *Simulate Delay* button hits this. The result lets the user
+    see the wrap score swing before any real ERP/EDC data is wired up.
+    Field idle cost is masked at the boundary per the CFO's policy.
+    """
+    try:
+        sim = wrap_risk.simulate_rfc_miss(
+            db,
+            project_id=project_id,
+            rfc_drawing_id=payload.rfc_drawing_id,
+            days_overdue=payload.days_overdue,
+            idle_crew=payload.idle_crew,
+            crew_burdened_rate=payload.crew_burdened_rate,
+        )
+    except LookupError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "rfc drawing not found")
+
+    out = SimulationOut(
+        before_score=sim.before_score,
+        after_score=sim.after_score,
+        delta=sim.delta,
+        idle_cost=sim.idle_cost,
+        factors_before=FactorsOut(**sim.factors_before.__dict__),
+        factors_after=FactorsOut(**sim.factors_after.__dict__),
+    )
+    # mask field-idle cost per CFO policy
+    from app.core.rbac import FinancialField
+    allowed = margin_mask.get_policy().fields_for(user.role)
+    if FinancialField.FIELD_IDLE_COST not in allowed:
+        out = out.model_copy(update={"idle_cost": None})
+    return out
 
 
 @router.get(

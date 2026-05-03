@@ -59,7 +59,7 @@ class ProjectFinancialSummary(BaseModel):
     MASK_FIELDS: ClassVar[dict[str, FinancialField]] = {
         "revenue": FinancialField.REVENUE,
         "actual_cost": FinancialField.ACTUAL_COST,
-        "margin": FinancialField.MARGIN,
+        "margin": FinancialField.INTERNAL_MARGIN,
         "margin_percent": FinancialField.MARGIN_PERCENT,
         "field_idle_cost": FinancialField.FIELD_IDLE_COST,
     }
