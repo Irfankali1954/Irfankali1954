@@ -103,19 +103,8 @@ def harvest_for_idle_event(db: Session, idle_event_id: int) -> DelayClaim:
             subject_kind = "rfc"
             subject_ref = rfc.drawing_no
             causing_org = rfc.issuer_org
-    if rfc is None:
-        # Permit-derived idle (cause == "missing_permit"); look for a tagged permit.
-        # We don't have a direct FK from IdleEvent → permit, so we scan for the
-        # latest pending permit at the project as a best-effort heuristic.
-        permit = (
-            db.query(PermitStatus)
-            .filter(
-                PermitStatus.project_id == evt.project_id,
-                PermitStatus.status != "granted",
-            )
-            .order_by(PermitStatus.target_date.asc())
-            .first()
-        )
+    elif evt.permit_id is not None:
+        permit = db.get(PermitStatus, evt.permit_id)
         if permit is not None:
             subject_kind = "permit"
             subject_ref = permit.permit_type
@@ -190,4 +179,18 @@ def harvest_for_idle_event(db: Session, idle_event_id: int) -> DelayClaim:
 
     db.commit()
     db.refresh(claim)
+
+    # Silo-buster: alert the right tier the moment a claim is drafted so
+    # field idle does not bleed unnoticed.
+    try:
+        from app.services import notification_service
+        notification_service.evaluate_for_project(
+            db, evt.project_id,
+            trigger="claim_drafted",
+            idle_event_id=evt.id,
+            claim_id=claim.id,
+        )
+    except Exception:  # pragma: no cover
+        pass
+
     return claim

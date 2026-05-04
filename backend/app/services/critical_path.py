@@ -82,4 +82,16 @@ def recompute(db: Session, project_id: int, *, trigger: str = "manual") -> Criti
     db.add(snap)
     db.commit()
     db.refresh(snap)
+
+    # Silo-buster: every CPM recompute pings the notification bus. The bus
+    # is dedup'd internally so a stable schedule won't spam alerts.
+    try:
+        from app.services import notification_service
+        notification_service.evaluate_for_project(
+            db, project_id, trigger=f"cpm_recompute:{trigger}",
+        )
+    except Exception:  # pragma: no cover — notification failures must never
+        # block the schedule recompute itself
+        pass
+
     return snap

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models.risk import IdleEvent, RFCDrawing
+from app.models.risk import IdleEvent, PermitStatus, RFCDrawing
 
 
 @dataclass
@@ -83,6 +83,40 @@ def open_idle_event_for_overdue_rfc(
         rfc_drawing_id=rfc.id,
         cause="missing_rfc",
         started_at=rfc.rfc_due,
+        idle_crew=idle_crew,
+        idle_equipment=[name for name, _ in equipment],
+        crew_burdened_rate=crew_burdened_rate,
+        equipment_rate=sum(r for _, r in equipment),
+        computed_cost=cost.total,
+    )
+    db.add(evt)
+    db.commit()
+    db.refresh(evt)
+    return evt
+
+
+def open_idle_event_for_overdue_permit(
+    db: Session,
+    permit: PermitStatus,
+    *,
+    idle_crew: int,
+    crew_burdened_rate: float,
+    equipment: list[tuple[str, float]],
+) -> IdleEvent:
+    """First-class permit-delay path. Mirrors the RFC variant exactly so the
+    harvester, notification bus, and risk engine can treat both causes
+    uniformly downstream."""
+    cost = compute_idle_cost(
+        rfc_due=permit.target_date,
+        idle_crew=idle_crew,
+        crew_burdened_rate=crew_burdened_rate,
+        equipment_rates=[r for _, r in equipment],
+    )
+    evt = IdleEvent(
+        project_id=permit.project_id,
+        permit_id=permit.id,
+        cause="missing_permit",
+        started_at=permit.target_date,
         idle_crew=idle_crew,
         idle_equipment=[name for name, _ in equipment],
         crew_burdened_rate=crew_burdened_rate,

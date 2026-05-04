@@ -14,27 +14,42 @@ from sqlalchemy.orm import Session
 from app.api.deps import CurrentUser, db_session, require_permission
 from app.core.rbac import Permission
 from app.models.schedule import CriticalPathSnapshot, ScheduleActivity
+from app.schemas.ingest import IngestHealthReportOut
 from app.schemas.schedule import (
     ActivityOut,
     CriticalPathOut,
     DailyLogIn,
     DailyLogOut,
 )
-from app.services import critical_path, daily_log_ingest
+from app.services import critical_path, daily_log_ingest, ingest_validation
+from pydantic import BaseModel
 
 router = APIRouter()
 
 
+class DailyLogResponse(BaseModel):
+    log: DailyLogOut
+    ingest_health: IngestHealthReportOut
+
+
 @router.post(
     "/daily-log",
-    response_model=DailyLogOut,
+    response_model=DailyLogResponse,
+    summary="Submit a daily log (voice-to-text)",
+    description=(
+        "Ingests a 30-second field update, parses progress + blockers, "
+        "updates the matching Gantt activity, recomputes CPM, and pings "
+        "the notification bus. The response includes an ``ingest_health`` "
+        "block flagging optional fields (``crew_count``, "
+        "``weather_lost_hours``) that improve Wrap Risk Score accuracy."
+    ),
     dependencies=[Depends(require_permission(Permission.DAILY_LOG_SUBMIT))],
 )
 def submit_daily_log(
     payload: DailyLogIn,
     db: Session = Depends(db_session),
     user: CurrentUser = Depends(require_permission(Permission.DAILY_LOG_SUBMIT)),
-) -> DailyLogOut:
+) -> DailyLogResponse:
     log = daily_log_ingest.ingest_log(
         db,
         project_id=payload.project_id,
@@ -44,7 +59,11 @@ def submit_daily_log(
         crew_count=payload.crew_count,
         weather_lost_hours=payload.weather_lost_hours,
     )
-    return DailyLogOut.model_validate(log)
+    health = ingest_validation.evaluate_daily_log(payload.model_dump())
+    return DailyLogResponse(
+        log=DailyLogOut.model_validate(log),
+        ingest_health=IngestHealthReportOut(**{**health.__dict__, "grade": health.grade}),
+    )
 
 
 @router.get("/projects/{project_id}/gantt", response_model=list[ActivityOut])

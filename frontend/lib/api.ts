@@ -87,10 +87,11 @@ export const api = {
     req<unknown[]>(`/risk/projects/${id}/rfc-misses`),
 
   seedDemo: (id: number) =>
-    req<{ project_id: number; rfc_drawings: { id: number; drawing_no: string; rfc_due: string }[] }>(
-      `/risk/projects/${id}/seed-demo`,
-      { method: "POST" },
-    ),
+    req<{
+      project_id: number;
+      rfc_drawings: { id: number; drawing_no: string; rfc_due: string }[];
+      permits: { id: number; permit_type: string; authority: string; target_date: string; status: string }[];
+    }>(`/risk/projects/${id}/seed-demo`, { method: "POST" }),
 
   simulateRfcMiss: (
     id: number,
@@ -183,6 +184,107 @@ export const api = {
 
   finalizeClaim: (id: number) =>
     req<ClaimSummary>(`/claims/${id}/finalize`, { method: "POST" }),
+
+  // Permit-delay simulation
+  simulatePermitDelay: (
+    id: number,
+    body: {
+      permit_id: number;
+      days_overdue: number;
+      idle_crew: number;
+      crew_burdened_rate: number;
+    },
+  ) =>
+    req<{
+      before_score: number;
+      after_score: number;
+      delta: number;
+      idle_cost: number | null;
+      factors_before: FactorVector;
+      factors_after: FactorVector;
+      claim_id: number | null;
+      approval_id: number | null;
+    }>(`/risk/projects/${id}/simulate-permit-delay`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  // Notifications
+  notifications: (projectId: number) =>
+    req<NotificationFeedItem[]>(`/notifications?project_id=${projectId}`),
+
+  evaluateNotifications: (projectId: number) =>
+    req<NotificationFeedItem | null>("/notifications/evaluate", {
+      method: "POST",
+      body: JSON.stringify({ project_id: projectId, trigger: "manual" }),
+    }),
+
+  listRecipients: () => req<Recipient[]>("/notifications/recipients"),
+
+  replaceRecipients: (rows: RecipientInput[]) =>
+    req<Recipient[]>("/notifications/recipients", {
+      method: "PUT",
+      body: JSON.stringify(rows),
+    }),
+
+  addRecipient: (row: RecipientInput) =>
+    req<Recipient>("/notifications/recipients", {
+      method: "POST",
+      body: JSON.stringify(row),
+    }),
+
+  deactivateRecipient: (id: number) =>
+    req(`/notifications/recipients/${id}`, { method: "DELETE" }),
+
+  // Comments
+  listComments: (kind: "idle_event" | "claim", id: number) =>
+    req<Comment[]>(`/comments?target_kind=${kind}&target_id=${id}`),
+
+  postComment: (kind: "idle_event" | "claim", id: number, body: string) =>
+    req<Comment>("/comments", {
+      method: "POST",
+      body: JSON.stringify({ target_kind: kind, target_id: id, body }),
+    }),
+};
+
+export type NotificationFeedItem = {
+  id: number;
+  project_id: number;
+  tier: "tier_1" | "tier_2" | "tier_3";
+  trigger: string;
+  subject: string;
+  body: string;
+  cpm_drift_days: number;
+  open_idle_cost: number;
+  idle_event_id: number | null;
+  claim_id: number | null;
+  dispatched_to: Array<{ channel: string; to: string; ok: boolean; tier: string }>;
+  created_at: string;
+};
+
+export type RecipientInput = {
+  name: string;
+  role_label: string;
+  email: string | null;
+  phone: string | null;
+  tiers: Array<"tier_1" | "tier_2" | "tier_3">;
+  active: boolean;
+};
+
+export type Recipient = RecipientInput & {
+  id: number;
+  updated_by: string;
+  updated_at: string;
+};
+
+export type Comment = {
+  id: number;
+  target_kind: string;
+  target_id: number;
+  author_email: string;
+  author_role: string;
+  body: string;
+  created_at: string;
 };
 
 export type ClaimSummary = {

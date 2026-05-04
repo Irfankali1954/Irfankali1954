@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import CurrentUser, db_session, require_permission
 from app.core.rbac import Permission
 from app.models.financial import CostItem, Project, RevenueItem
-from app.models.risk import IdleEvent, RFCDrawing, WrapScoreSnapshot
+from app.models.risk import IdleEvent, PermitStatus, RFCDrawing, WrapScoreSnapshot
 from app.models.schedule import ScheduleActivity
 from app.schemas.risk import (
     FieldIdleCostBreakdown,
@@ -29,6 +29,13 @@ class SimulateRfcMissIn(BaseModel):
     days_overdue: int = 7
     idle_crew: int = 12
     crew_burdened_rate: float = 120.0
+
+
+class SimulatePermitDelayIn(BaseModel):
+    permit_id: int
+    days_overdue: int = 7
+    idle_crew: int = 18
+    crew_burdened_rate: float = 130.0
 
 
 class FactorsOut(BaseModel):
@@ -120,6 +127,24 @@ def seed_demo(project_id: int, db: Session = Depends(db_session)) -> dict:
             ),
         ])
 
+    if db.query(PermitStatus).filter(PermitStatus.project_id == project_id).count() == 0:
+        db.add_all([
+            PermitStatus(
+                project_id=project_id,
+                permit_type="Air Quality Construction Permit",
+                authority="State EPA Region 7",
+                target_date=now + timedelta(days=10),
+                status="pending",
+            ),
+            PermitStatus(
+                project_id=project_id,
+                permit_type="Wetlands 404 Permit",
+                authority="USACE District",
+                target_date=now + timedelta(days=18),
+                status="pending",
+            ),
+        ])
+
     if db.query(ScheduleActivity).filter(ScheduleActivity.project_id == project_id).count() == 0:
         db.add_all([
             ScheduleActivity(
@@ -157,9 +182,12 @@ def seed_demo(project_id: int, db: Session = Depends(db_session)) -> dict:
     db.commit()
 
     rfcs = db.query(RFCDrawing).filter(RFCDrawing.project_id == project_id).all()
+    permits = db.query(PermitStatus).filter(PermitStatus.project_id == project_id).all()
     return {
         "project_id": project_id,
         "rfc_drawings": [{"id": r.id, "drawing_no": r.drawing_no, "rfc_due": r.rfc_due.isoformat()} for r in rfcs],
+        "permits": [{"id": p.id, "permit_type": p.permit_type, "authority": p.authority,
+                     "target_date": p.target_date.isoformat(), "status": p.status} for p in permits],
     }
 
 
@@ -203,6 +231,49 @@ def simulate_rfc_miss(
         approval_id=sim.approval_id,
     )
     # mask field-idle cost per CFO policy
+    from app.core.rbac import FinancialField
+    allowed = margin_mask.get_policy().fields_for(user.role)
+    if FinancialField.FIELD_IDLE_COST not in allowed:
+        out = out.model_copy(update={"idle_cost": None})
+    return out
+
+
+@router.post(
+    "/projects/{project_id}/simulate-permit-delay",
+    response_model=SimulationOut,
+    dependencies=[Depends(require_permission(Permission.RISK_RECALC))],
+)
+def simulate_permit_delay(
+    project_id: int,
+    payload: SimulatePermitDelayIn,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(require_permission(Permission.RISK_RECALC)),
+) -> SimulationOut:
+    """Permit-delay sibling of :func:`simulate_rfc_miss`. Backdates a permit
+    target date, opens an :class:`IdleEvent` linked via ``permit_id``, and
+    auto-drafts a Delay Claim so the permit-delay path has full parity."""
+    try:
+        sim = wrap_risk.simulate_permit_delay(
+            db,
+            project_id=project_id,
+            permit_id=payload.permit_id,
+            days_overdue=payload.days_overdue,
+            idle_crew=payload.idle_crew,
+            crew_burdened_rate=payload.crew_burdened_rate,
+        )
+    except LookupError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "permit not found")
+
+    out = SimulationOut(
+        before_score=sim.before_score,
+        after_score=sim.after_score,
+        delta=sim.delta,
+        idle_cost=sim.idle_cost,
+        factors_before=FactorsOut(**sim.factors_before.__dict__),
+        factors_after=FactorsOut(**sim.factors_after.__dict__),
+        claim_id=sim.claim_id,
+        approval_id=sim.approval_id,
+    )
     from app.core.rbac import FinancialField
     allowed = margin_mask.get_policy().fields_for(user.role)
     if FinancialField.FIELD_IDLE_COST not in allowed:

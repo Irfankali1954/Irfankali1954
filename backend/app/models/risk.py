@@ -41,6 +41,7 @@ class IdleEvent(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
     rfc_drawing_id: Mapped[int | None] = mapped_column(ForeignKey("rfc_drawings.id"), nullable=True)
+    permit_id: Mapped[int | None] = mapped_column(ForeignKey("permit_status.id"), nullable=True)
     cause: Mapped[str] = mapped_column(String(64))  # missing_rfc | missing_permit | long_lead
 
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

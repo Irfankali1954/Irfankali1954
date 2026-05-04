@@ -13,8 +13,9 @@ from sqlalchemy.orm import Session
 from app.api.deps import db_session, require_permission
 from app.core.rbac import Permission
 from app.models.schedule import ScheduleActivity
+from app.schemas.ingest import IngestHealthReportOut
 from app.schemas.schedule import ScheduleImportResult
-from app.services import erp_bridge, mpp_parser, xer_parser
+from app.services import erp_bridge, ingest_validation, mpp_parser, xer_parser
 from app.services import critical_path
 
 router = APIRouter()
@@ -22,13 +23,31 @@ router = APIRouter()
 
 @router.post(
     "/{vendor}/sync",
+    summary="Bi-directional ERP sync (Oracle Fusion or SAP S/4HANA)",
+    description=(
+        "Pulls commitments and pushes accruals against the named vendor. "
+        "The response includes an ``ingest_health`` block describing which "
+        "expected fields were present in the inbound payload — internal EPC "
+        "dev teams should aim for grade A by populating optional fields "
+        "such as ``permit_due_date`` and ``expected_delivery``."
+    ),
     dependencies=[Depends(require_permission(Permission.ERP_SYNC))],
 )
 def erp_sync(vendor: str, project_code: str) -> dict:
     try:
-        return erp_bridge.sync_project(vendor, project_code)
+        result = erp_bridge.sync_project(vendor, project_code)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+
+    # The bridge stub returns no records yet; in production this would be the
+    # connector's pulled commitments. We score whatever was returned so the
+    # ingest contract is exercised end-to-end.
+    pulled = result.get("pulled_records") or []
+    health = ingest_validation.evaluate_erp_commitments(pulled, vendor=vendor)
+    result["ingest_health"] = IngestHealthReportOut(
+        **{**health.__dict__, "grade": health.grade}
+    ).model_dump()
+    return result
 
 
 def _persist_activities(db: Session, project_id: int, parsed, source: str) -> int:

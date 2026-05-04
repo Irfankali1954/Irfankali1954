@@ -23,7 +23,9 @@ type Score = Awaited<ReturnType<typeof api.wrapScore>>;
 export default function RiskPage() {
   const [score, setScore] = useState<Score | null>(null);
   const [drawings, setDrawings] = useState<{ id: number; drawing_no: string }[]>([]);
+  const [permits, setPermits] = useState<{ id: number; permit_type: string }[]>([]);
   const [drawingId, setDrawingId] = useState<number | null>(null);
+  const [permitId, setPermitId] = useState<number | null>(null);
   const [daysOverdue, setDaysOverdue] = useState(7);
   const [idleCrew, setIdleCrew] = useState(12);
   const [crewRate, setCrewRate] = useState(120);
@@ -39,8 +41,29 @@ export default function RiskPage() {
     try {
       const r = await api.seedDemo(PROJECT_ID);
       setDrawings(r.rfc_drawings);
+      setPermits(r.permits);
       if (r.rfc_drawings[0]) setDrawingId(r.rfc_drawings[0].id);
+      if (r.permits[0]) setPermitId(r.permits[0].id);
     } catch (e) { setErr(String(e)); }
+  }
+
+  async function simulatePermit() {
+    if (permitId == null) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await api.simulatePermitDelay(PROJECT_ID, {
+        permit_id: permitId,
+        days_overdue: daysOverdue,
+        idle_crew: idleCrew,
+        crew_burdened_rate: crewRate,
+      });
+      setSim(r);
+      api.wrapScore(PROJECT_ID).then(setScore).catch(() => {});
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function simulate() {
@@ -105,6 +128,22 @@ export default function RiskPage() {
         </label>
         <button onClick={simulate} disabled={busy || drawingId == null}>
           {busy ? "Simulating…" : "Simulate RFC miss"}
+        </button>
+      </div>
+
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", marginTop: 12 }}>
+        <select
+          value={permitId ?? ""}
+          onChange={(e) => setPermitId(Number(e.target.value))}
+          disabled={permits.length === 0}
+        >
+          {permits.length === 0 && <option value="">— seed first —</option>}
+          {permits.map((p) => (
+            <option key={p.id} value={p.id}>{p.permit_type}</option>
+          ))}
+        </select>
+        <button onClick={simulatePermit} disabled={busy || permitId == null}>
+          {busy ? "Simulating…" : "Simulate Permit Delay"}
         </button>
       </div>
 

@@ -17,6 +17,7 @@
 
 import { useEffect, useState } from "react";
 import { api, type ClaimSummary, type Role } from "@/lib/api";
+import { CommentsThread } from "@/components/CommentsThread";
 
 const PROJECT_ID = 1;
 
@@ -149,6 +150,8 @@ export default function ClaimsPage() {
             }}>
               {packet || selected.statement_of_facts || "(no SoF rendered)"}
             </pre>
+
+            <CommentsThread kind="claim" id={selected.id} />
           </>
         ) : (
           <p>Select a claim from the list.</p>

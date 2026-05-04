@@ -51,6 +51,7 @@ from app.models.risk import (
     IdleEvent,
     WrapScoreSnapshot,
 )
+from datetime import timedelta
 from app.models.schedule import CriticalPathSnapshot
 from app.services import field_idle_cost
 
@@ -242,7 +243,6 @@ def simulate_rfc_miss(
     before = factors_for(db, project_id)
 
     # Mutate: backdate the due date and clear any prior issuance.
-    from datetime import timedelta
     rfc.rfc_due = datetime.now(timezone.utc) - timedelta(days=days_overdue)
     rfc.rfc_issued = None
     db.add(rfc)
@@ -268,6 +268,73 @@ def simulate_rfc_miss(
     approval_id: int | None = None
     if auto_draft_claim:
         # Local import to avoid a service-level circular dependency.
+        from app.services import claim_harvester
+        claim = claim_harvester.harvest_for_idle_event(db, idle_event.id)
+        claim_id = claim.id
+        approval_id = claim.approval_id
+
+    return SimulationResult(
+        before_score=before.composite(),
+        after_score=after.composite(),
+        delta=after.composite() - before.composite(),
+        idle_cost=float(idle_event.computed_cost or 0),
+        factors_before=before,
+        factors_after=after,
+        claim_id=claim_id,
+        approval_id=approval_id,
+    )
+
+
+def simulate_permit_delay(
+    db: Session,
+    *,
+    project_id: int,
+    permit_id: int,
+    days_overdue: int = 7,
+    idle_crew: int = 18,
+    crew_burdened_rate: float = 130.0,
+    equipment: list[tuple[str, float]] | None = None,
+    auto_draft_claim: bool = True,
+) -> SimulationResult:
+    """Permit-delay sibling of :func:`simulate_rfc_miss`.
+
+    Backdates ``permit.target_date``, leaves status non-granted, opens an
+    :class:`IdleEvent` linked via ``permit_id``, recomputes the wrap score,
+    and (by default) auto-drafts a Delay-Claim. The harvester resolves the
+    permit subject from ``IdleEvent.permit_id`` directly — no heuristic.
+    """
+    permit = db.get(PermitStatus, permit_id)
+    if permit is None:
+        raise LookupError("permit not found")
+
+    before = factors_for(db, project_id)
+
+    permit.target_date = datetime.now(timezone.utc) - timedelta(days=days_overdue)
+    if permit.status == "granted":
+        permit.status = "pending"
+    permit.granted_date = None
+    db.add(permit)
+    db.flush()
+
+    idle_event = field_idle_cost.open_idle_event_for_overdue_permit(
+        db, permit,
+        idle_crew=idle_crew,
+        crew_burdened_rate=crew_burdened_rate,
+        equipment=equipment or [("crane_LR1300", 950.0), ("welding_rig", 220.0)],
+    )
+
+    after_snap = compute(db, project_id, notes=f"sim:permit_delay {permit.permit_type}")
+    after = Factors(
+        schedule=after_snap.schedule_factor,
+        rfc=after_snap.rfc_factor,
+        permit=after_snap.permit_factor,
+        long_lead=after_snap.long_lead_factor,
+        field_idle=after_snap.field_idle_factor,
+    )
+
+    claim_id: int | None = None
+    approval_id: int | None = None
+    if auto_draft_claim:
         from app.services import claim_harvester
         claim = claim_harvester.harvest_for_idle_event(db, idle_event.id)
         claim_id = claim.id

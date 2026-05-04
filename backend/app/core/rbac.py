@@ -46,6 +46,10 @@ class Permission(str, Enum):
     # CFO-only tech permissions
     FINANCIAL_GATEKEEPER = "financial:gatekeeper"
     VISIBILITY_POLICY_WRITE = "visibility_policy:write"
+    SENIOR_ALERT_LIST_WRITE = "senior_alert_list:write"
+
+    # Management feedback
+    MGMT_COMMENT_WRITE = "mgmt_comment:write"
 
 
 # Default tech-permission matrix. Admin can edit at runtime via /admin/roles.
@@ -54,8 +58,10 @@ DEFAULT_PERMISSIONS: dict[TechnicalRole, set[Permission]] = {
     TechnicalRole.CFO: {
         Permission.FINANCIAL_GATEKEEPER,
         Permission.VISIBILITY_POLICY_WRITE,
+        Permission.SENIOR_ALERT_LIST_WRITE,
         Permission.RISK_READ,
         Permission.RISK_RECALC,
+        Permission.MGMT_COMMENT_WRITE,
     },
     TechnicalRole.PROJECT_DIRECTOR: {
         Permission.RISK_READ,
@@ -63,6 +69,7 @@ DEFAULT_PERMISSIONS: dict[TechnicalRole, set[Permission]] = {
         Permission.SCHEDULE_IMPORT,
         Permission.SCHEDULE_WRITE,
         Permission.DELAY_CLAIM_FILE,
+        Permission.MGMT_COMMENT_WRITE,
     },
     TechnicalRole.EPC_MANAGER: {
         Permission.SCHEDULE_WRITE,
