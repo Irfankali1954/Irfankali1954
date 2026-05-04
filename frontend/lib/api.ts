@@ -108,6 +108,8 @@ export const api = {
       idle_cost: number | null;
       factors_before: FactorVector;
       factors_after: FactorVector;
+      claim_id: number | null;
+      approval_id: number | null;
     }>(`/risk/projects/${id}/simulate-rfc-miss`, {
       method: "POST",
       body: JSON.stringify(body),
@@ -154,6 +156,59 @@ export const api = {
         created_at: string;
       }>;
     }>>(`/messages/threads?project_id=${projectId}`),
+
+  // Claims
+  listClaims: (projectId: number) =>
+    req<ClaimSummary[]>(`/claims?project_id=${projectId}`),
+
+  getClaim: (id: number) => req<ClaimSummary>(`/claims/${id}`),
+
+  packetUrl: (id: number, format: "md" | "html" = "html") =>
+    `${BASE}/claims/${id}/packet?format=${format}`,
+
+  fetchPacket: async (id: number, format: "md" | "html" = "md"): Promise<string> => {
+    const t = token();
+    const res = await fetch(`${BASE}/claims/${id}/packet?format=${format}`, {
+      headers: t ? { Authorization: `Bearer ${t}` } : {},
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.text();
+  },
+
+  approveApproval: (approvalId: number, decision: "approve" | "reject", notes?: string) =>
+    req(`/cfo/gatekeeper/approvals/${approvalId}`, {
+      method: "POST",
+      body: JSON.stringify({ decision, notes }),
+    }),
+
+  finalizeClaim: (id: number) =>
+    req<ClaimSummary>(`/claims/${id}/finalize`, { method: "POST" }),
+};
+
+export type ClaimSummary = {
+  id: number;
+  project_id: number;
+  causing_org: string;
+  subject_kind: string;
+  subject_ref: string;
+  rfc_drawing_id: number | null;
+  permit_id: number | null;
+  idle_event_id: number | null;
+  opened_at: string;
+  impact_days: number;
+  cod_shift_days: number;
+  impact_value: number | null;
+  statement_of_facts: string | null;
+  approval_id: number | null;
+  status: string;
+  finalized_at: string | null;
+  communications: Array<{
+    ts: string;
+    from: string;
+    org: string;
+    body: string;
+    mentions: string[];
+  }>;
 };
 
 export type FactorVector = {

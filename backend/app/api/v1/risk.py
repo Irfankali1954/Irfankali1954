@@ -46,6 +46,8 @@ class SimulationOut(BaseModel):
     idle_cost: float | None  # masked
     factors_before: FactorsOut
     factors_after: FactorsOut
+    claim_id: int | None = None
+    approval_id: int | None = None
 
 
 @router.get(
@@ -197,6 +199,8 @@ def simulate_rfc_miss(
         idle_cost=sim.idle_cost,
         factors_before=FactorsOut(**sim.factors_before.__dict__),
         factors_after=FactorsOut(**sim.factors_after.__dict__),
+        claim_id=sim.claim_id,
+        approval_id=sim.approval_id,
     )
     # mask field-idle cost per CFO policy
     from app.core.rbac import FinancialField

@@ -73,14 +73,27 @@ class WrapScoreSnapshot(Base):
 
 
 class DelayClaim(Base):
-    """An auto-built delay-claim packet for 'wrap responsibility' management."""
+    """Auto-built delay-claim packet for 'wrap responsibility' management.
+
+    A claim is *harvested* the moment an :class:`IdleEvent` opens — the agent
+    pulls all context-tagged :class:`Message`\\ s into ``communications``,
+    renders the Statement of Facts, computes COD slip, and parks the
+    resulting record at the CFO Approval Gate. Status flow:
+
+        ``draft`` → CFO approves → ``approved`` → user finalizes → ``filed``
+                  ↘ CFO rejects → ``rejected``
+    """
     __tablename__ = "delay_claims"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
     causing_org: Mapped[str] = mapped_column(String(128))
     rfc_drawing_id: Mapped[int | None] = mapped_column(ForeignKey("rfc_drawings.id"), nullable=True)
-    idle_event_id: Mapped[int | None] = mapped_column(ForeignKey("idle_events.id"), nullable=True)
+    permit_id: Mapped[int | None] = mapped_column(ForeignKey("permit_status.id"), nullable=True)
+    idle_event_id: Mapped[int | None] = mapped_column(ForeignKey("idle_events.id"), nullable=True, index=True)
+
+    subject_kind: Mapped[str] = mapped_column(String(16), default="rfc")  # rfc | permit
+    subject_ref: Mapped[str] = mapped_column(String(128), default="")     # e.g. drawing_no
 
     opened_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -88,5 +101,12 @@ class DelayClaim(Base):
     )
     communications: Mapped[list[dict]] = mapped_column(JSON, default=list)
     impact_days: Mapped[float] = mapped_column(Float, default=0)
+    cod_shift_days: Mapped[float] = mapped_column(Float, default=0)
     impact_value: Mapped[float] = mapped_column(Numeric(18, 2), default=0)  # masked
-    status: Mapped[str] = mapped_column(String(32), default="draft")  # draft|filed|settled
+
+    statement_of_facts: Mapped[str | None] = mapped_column(String(16000), nullable=True)
+    approval_id: Mapped[int | None] = mapped_column(
+        ForeignKey("gatekeeper_approvals.id"), nullable=True,
+    )
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="draft")  # draft|approved|rejected|filed

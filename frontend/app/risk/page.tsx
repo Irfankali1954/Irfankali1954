@@ -120,6 +120,13 @@ export default function RiskPage() {
               ({sim.delta >= 0 ? "+" : ""}{sim.delta.toFixed(1)})
             </span>
           </p>
+          {sim.claim_id != null && (
+            <p style={{ background: "#fff7d6", padding: 10, border: "1px solid #e5d585", borderRadius: 4 }}>
+              Auto-drafted Delay-Claim <strong>#{sim.claim_id}</strong> with CFO approval{" "}
+              <strong>#{sim.approval_id}</strong> pending.{" "}
+              <a href="/claims">Review in Claims →</a>
+            </p>
+          )}
           <p>
             Field idle cost generated:{" "}
             {sim.idle_cost == null ? <em>masked by visibility policy</em> : `$${sim.idle_cost.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}

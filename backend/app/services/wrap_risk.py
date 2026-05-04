@@ -212,6 +212,8 @@ class SimulationResult:
     idle_cost: float
     factors_before: Factors
     factors_after: Factors
+    claim_id: int | None = None
+    approval_id: int | None = None
 
 
 def simulate_rfc_miss(
@@ -223,6 +225,7 @@ def simulate_rfc_miss(
     idle_crew: int = 12,
     crew_burdened_rate: float = 120.0,
     equipment: list[tuple[str, float]] | None = None,
+    auto_draft_claim: bool = True,
 ) -> SimulationResult:
     """Apply a synthetic RFC miss, recompute, return before/after.
 
@@ -261,6 +264,15 @@ def simulate_rfc_miss(
         field_idle=after_snap.field_idle_factor,
     )
 
+    claim_id: int | None = None
+    approval_id: int | None = None
+    if auto_draft_claim:
+        # Local import to avoid a service-level circular dependency.
+        from app.services import claim_harvester
+        claim = claim_harvester.harvest_for_idle_event(db, idle_event.id)
+        claim_id = claim.id
+        approval_id = claim.approval_id
+
     return SimulationResult(
         before_score=before.composite(),
         after_score=after.composite(),
@@ -268,4 +280,6 @@ def simulate_rfc_miss(
         idle_cost=float(idle_event.computed_cost or 0),
         factors_before=before,
         factors_after=after,
+        claim_id=claim_id,
+        approval_id=approval_id,
     )
