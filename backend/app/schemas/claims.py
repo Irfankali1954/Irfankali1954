@@ -25,10 +25,14 @@ class DelayClaimOut(BaseModel):
     rfc_drawing_id: int | None
     permit_id: int | None
     idle_event_id: int | None
+    linked_activity_id: str | None
     opened_at: datetime
     impact_days: float
     cod_shift_days: float
-    impact_value: float | None = None      # masked by FIELD_IDLE_COST
+    impact_value: float | None = None      # gross, masked
+    co_offset_value: float | None = None   # CO recovery applied, masked
+    net_impact_value: float | None = None  # impact - offset, masked
+    double_count_flag: bool = False
     statement_of_facts: str | None
     approval_id: int | None
     status: str
@@ -39,6 +43,8 @@ class DelayClaimOut(BaseModel):
 
     MASK_FIELDS: ClassVar[dict[str, FinancialField]] = {
         "impact_value": FinancialField.DELAY_CLAIM_VALUE,
+        "co_offset_value": FinancialField.DELAY_CLAIM_VALUE,
+        "net_impact_value": FinancialField.DELAY_CLAIM_VALUE,
     }
 
 

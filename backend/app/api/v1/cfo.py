@@ -9,7 +9,7 @@ The Financial Gatekeeper:
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import CurrentUser, db_session, require_role
@@ -30,7 +30,7 @@ from app.schemas.financial import (
     ProjectFinancialSummary,
     VisibilityPolicyUpdate,
 )
-from app.services import cfo_gatekeeper, margin_mask
+from app.services import cfo_gatekeeper, convergence_service, margin_mask
 
 router = APIRouter()
 
@@ -137,6 +137,78 @@ def list_pending(db: Session = Depends(db_session)) -> list[dict]:
         }
         for r in rows
     ]
+
+
+@router.get(
+    "/net-exposure",
+    summary="Net Exposure dashboard (Convergence of Truth)",
+    description=(
+        "Returns one row per activity that carries either an active Delay "
+        "Claim or an approved Change Order, plus a project-level total. "
+        "Net exposure = Σ gross claim impact − Σ approved CO recovery, "
+        "clamped at 0. Financial figures are masked per the CFO Visibility "
+        "Policy: callers without ``DELAY_CLAIM_VALUE`` see ``null`` for "
+        "the dollar fields and only the structural shape (claim ids, CO "
+        "ids, double-count flags) of the exposure."
+    ),
+)
+def net_exposure(
+    project_id: int = Query(...),
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(require_role(*list(TechnicalRole))),
+) -> dict:
+    rows = convergence_service.compute_for_project(db, project_id)
+    allowed = margin_mask.get_policy().fields_for(user.role)
+    show_money = FinancialField.DELAY_CLAIM_VALUE in allowed
+
+    def _m(v: float) -> float | None:
+        return v if show_money else None
+
+    items = [
+        {
+            "activity_id": r.activity_id,
+            "gross_claim_impact": _m(r.gross_claim_impact),
+            "approved_co_recovery": _m(r.approved_co_recovery),
+            "net_exposure": _m(r.net_exposure),
+            "claim_ids": r.claim_ids,
+            "change_order_ids": r.change_order_ids,
+            "double_count_risk": r.double_count_risk,
+            "fully_de_risked": r.fully_de_risked,
+        }
+        for r in rows
+    ]
+    totals = {
+        "gross_claim_impact": _m(sum(r.gross_claim_impact for r in rows)),
+        "approved_co_recovery": _m(sum(r.approved_co_recovery for r in rows)),
+        "net_exposure": _m(sum(r.net_exposure for r in rows)),
+        "double_count_activities": sum(1 for r in rows if r.double_count_risk),
+    }
+    return {
+        "project_id": project_id,
+        "items": items,
+        "totals": totals,
+        "viewer_role": user.role.value,
+        "money_visible": show_money,
+    }
+
+
+@router.post(
+    "/net-exposure/reconcile",
+    dependencies=[Depends(require_role(TechnicalRole.CFO))],
+)
+def reconcile_all(
+    project_id: int = Query(...),
+    db: Session = Depends(db_session),
+) -> dict:
+    """CFO-only manual reconcile across every activity on the project.
+
+    Idempotent — re-runs the offset distribution for every claim/CO pair
+    so the books are fresh before a bank audit.
+    """
+    rows = convergence_service.compute_for_project(db, project_id)
+    for r in rows:
+        convergence_service.reconcile_activity(db, project_id, r.activity_id)
+    return {"project_id": project_id, "activities_reconciled": len(rows)}
 
 
 @router.post("/gatekeeper/approvals/{approval_id}", dependencies=[Depends(require_role(TechnicalRole.CFO))])

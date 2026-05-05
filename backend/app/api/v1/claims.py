@@ -31,6 +31,11 @@ router = APIRouter()
 
 def _to_out(row: DelayClaim, viewer: CurrentUser) -> DelayClaimOut:
     out = DelayClaimOut.model_validate(row, from_attributes=True)
+    # Convergence of Truth — net = gross − offset, computed at the boundary
+    # so the persisted gross stays auditable.
+    gross = float(row.impact_value or 0)
+    offset = float(row.co_offset_value or 0)
+    out = out.model_copy(update={"net_impact_value": max(0.0, gross - offset)})
     return margin_mask.apply_visibility(out, viewer.role)
 
 

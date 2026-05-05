@@ -76,13 +76,13 @@ record of notice and demand:
 
 {message_log}
 
-### 2.4 Direct financial damages
+### 2.4 Direct financial damages (gross)
 
 The measured Field Idle Cost arising from §2.2 above totals
 **{total_cost}** (see §3 for itemisation). This amount represents
-recoverable cost incurred by the Lead EPC by reason of the failure
-described in §2.1.
-"""
+gross recoverable cost incurred by the Lead EPC by reason of the
+failure described in §2.1.
+{convergence_block}"""
 
 _DELIVERABLE_RFC = """\
 Drawing **{drawing_no}** "{title}" (discipline: {discipline}) was
@@ -172,6 +172,8 @@ def render_statement_of_facts(ctx: PacketContext) -> str:
     impact_days = ctx.claim.impact_days or 0.0
     idle_hours = impact_days * 10.0  # mirrors WORKING_HOURS_PER_DAY in field_idle_cost
 
+    convergence_block = _render_convergence_block(ctx, cost_allowed)
+
     return _SOF_TEMPLATE.format(
         project_code=project.code,
         project_name=project.name,
@@ -186,6 +188,41 @@ def render_statement_of_facts(ctx: PacketContext) -> str:
         impact_days=impact_days,
         message_log=_render_message_log(ctx.messages),
         total_cost=total_cost,
+        convergence_block=convergence_block,
+    )
+
+
+def _render_convergence_block(ctx: PacketContext, cost_allowed: bool) -> str:
+    """§2.5 — only rendered if approved CO recovery offsets the gross claim.
+
+    Suppressing the block when no offset exists keeps short claims short;
+    once an offset lands, the SoF must show *net*, because that's the
+    number the auditor will reconcile against the books.
+    """
+    claim = ctx.claim
+    offset = float(claim.co_offset_value or 0)
+    gross = float(claim.impact_value or 0)
+    if offset <= 0:
+        if claim.double_count_flag:
+            return (
+                "\n### 2.5 Double-count notice\n\n"
+                "An open Change Order has been logged on the same activity. "
+                "Net recoverable will be reconciled at filing time per the "
+                "Convergence-of-Truth audit (no double recovery is sought).\n"
+            )
+        return ""
+
+    net = max(0.0, gross - offset)
+    gross_s = _money(gross, cost_allowed)
+    off_s = _money(offset, cost_allowed)
+    net_s = _money(net, cost_allowed)
+    return (
+        "\n### 2.5 Approved Change Order recovery (offset)\n\n"
+        f"An approved Change Order on the same activity already covers "
+        f"{off_s} of the gross damages stated in §2.4. The Lead EPC therefore "
+        f"asserts only the **net recoverable** balance — gross {gross_s} less "
+        f"approved-CO offset {off_s} = **{net_s}** — to avoid double "
+        "recovery of damages already converted into approved scope.\n"
     )
 
 

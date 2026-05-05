@@ -72,8 +72,19 @@ def _cod_shift_days(db: Session, project: Project) -> tuple[float, datetime | No
     return max(0.0, delta), finish
 
 
-def harvest_for_idle_event(db: Session, idle_event_id: int) -> DelayClaim:
-    """Idempotent: re-running on the same idle event returns the existing claim."""
+def harvest_for_idle_event(
+    db: Session,
+    idle_event_id: int,
+    *,
+    linked_activity_id: str | None = None,
+) -> DelayClaim:
+    """Idempotent: re-running on the same idle event returns the existing claim.
+
+    ``linked_activity_id`` is the Convergence-of-Truth hook — pass it from
+    the simulator (or the EDC scanner) to bind the claim to the same Gantt
+    activity that approved Change Orders track against, so the auditor can
+    reconcile gross claim vs. approved-CO recovery.
+    """
     evt = db.get(IdleEvent, idle_event_id)
     if evt is None:
         raise LookupError(f"idle event {idle_event_id} not found")
@@ -137,12 +148,44 @@ def harvest_for_idle_event(db: Session, idle_event_id: int) -> DelayClaim:
     impact_days = max(0.0, (datetime.now(timezone.utc) - started).total_seconds() / 86_400.0)
     impact_value = float(evt.computed_cost or 0)
 
+    # --- 4a. Resolve activity linkage for the Convergence Service --------
+    activity_for_claim = linked_activity_id
+    if activity_for_claim is None:
+        # Fallback: pick the first message tagged to BOTH the subject and
+        # an activity. This is how ground-truth flows from field chatter
+        # without anyone having to type the activity into a form.
+        if rfc is not None:
+            tagged = (
+                db.query(Message)
+                .filter(
+                    Message.rfc_drawing_id == rfc.id,
+                    Message.activity_id.is_not(None),
+                )
+                .order_by(Message.created_at)
+                .first()
+            )
+            if tagged is not None:
+                activity_for_claim = tagged.activity_id
+        elif permit is not None:
+            tagged = (
+                db.query(Message)
+                .filter(
+                    Message.permit_id == permit.id,
+                    Message.activity_id.is_not(None),
+                )
+                .order_by(Message.created_at)
+                .first()
+            )
+            if tagged is not None:
+                activity_for_claim = tagged.activity_id
+
     claim = DelayClaim(
         project_id=evt.project_id,
         causing_org=causing_org,
         rfc_drawing_id=rfc.id if rfc else None,
         permit_id=permit.id if permit else None,
         idle_event_id=evt.id,
+        linked_activity_id=activity_for_claim,
         subject_kind=subject_kind,
         subject_ref=subject_ref,
         communications=communications,
@@ -179,6 +222,41 @@ def harvest_for_idle_event(db: Session, idle_event_id: int) -> DelayClaim:
 
     db.commit()
     db.refresh(claim)
+
+    # --- Convergence of Truth ---------------------------------------------
+    # If the claim's activity already carries an approved Change Order,
+    # flag it as a potential double-count and reconcile the offset so the
+    # Statement of Facts and the CFO Exposure dashboard show the *net*
+    # recoverable amount, not the gross.
+    try:
+        from app.services import convergence_service
+        finding = convergence_service.evaluate_double_count_risk(db, claim)
+        if claim.linked_activity_id:
+            convergence_service.reconcile_activity(
+                db, claim.project_id, claim.linked_activity_id,
+            )
+        db.commit()
+        db.refresh(claim)
+        # Re-render the SoF now that the offset (if any) has landed so the
+        # persisted narrative reflects the true net recoverable amount.
+        if float(claim.co_offset_value or 0) > 0 or claim.double_count_flag:
+            ctx2 = defense_packet.PacketContext(
+                claim=claim,
+                project=project,
+                idle_event=evt,
+                rfc=rfc,
+                permit=permit,
+                messages=communications,
+                viewer_role=TechnicalRole.CFO,
+                policy=margin_mask.get_policy(),
+            )
+            claim.statement_of_facts = defense_packet.render_statement_of_facts(ctx2)
+            db.commit()
+            db.refresh(claim)
+        if finding is not None:
+            convergence_service.fire_double_count_alert(db, finding, claim.project_id)
+    except Exception:  # pragma: no cover
+        pass
 
     # Silo-buster: alert the right tier the moment a claim is drafted so
     # field idle does not bleed unnoticed.

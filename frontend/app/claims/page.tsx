@@ -123,13 +123,34 @@ export default function ClaimsPage() {
 
             <p>
               Versus <strong>{selected.causing_org}</strong> · subject{" "}
-              <code>{selected.subject_ref}</code> · COD slip{" "}
-              <strong>{selected.cod_shift_days.toFixed(1)} days</strong> · impact{" "}
+              <code>{selected.subject_ref}</code>
+              {selected.linked_activity_id && <> · activity <code>{selected.linked_activity_id}</code></>}
+              {" "}· COD slip{" "}
+              <strong>{selected.cod_shift_days.toFixed(1)} days</strong>
+            </p>
+
+            <p>
+              Gross impact{" "}
               <strong>
                 {selected.impact_value == null
                   ? "— masked —"
                   : `$${selected.impact_value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
               </strong>
+              {selected.co_offset_value != null && selected.co_offset_value > 0 && (
+                <>
+                  {" "}· CO offset{" "}
+                  <strong>{`$${selected.co_offset_value.toLocaleString(undefined, { maximumFractionDigits: 0 })}`}</strong>
+                  {" "}· <span style={{ color: "#1f7a32" }}>net <strong>{`$${(selected.net_impact_value ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}</strong></span>
+                </>
+              )}
+              {selected.double_count_flag && (
+                <span style={{
+                  marginLeft: 8, background: "#a31f1f", color: "white",
+                  padding: "1px 8px", borderRadius: 3, fontSize: 11,
+                }}>
+                  DOUBLE-COUNT FLAGGED
+                </span>
+              )}
             </p>
 
             <div style={{ display: "flex", gap: 8, margin: "12px 0" }}>

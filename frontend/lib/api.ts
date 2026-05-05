@@ -292,6 +292,40 @@ export const api = {
 
   approveCO: (id: number) =>
     req<ChangeOrderRow>(`/change-orders/${id}/approve`, { method: "POST" }),
+
+  // Net Exposure (Convergence of Truth)
+  netExposure: (projectId: number) =>
+    req<NetExposureReport>(`/cfo/net-exposure?project_id=${projectId}`),
+
+  reconcileExposure: (projectId: number) =>
+    req<{ project_id: number; activities_reconciled: number }>(
+      `/cfo/net-exposure/reconcile?project_id=${projectId}`,
+      { method: "POST" },
+    ),
+};
+
+export type ExposureRow = {
+  activity_id: string;
+  gross_claim_impact: number | null;
+  approved_co_recovery: number | null;
+  net_exposure: number | null;
+  claim_ids: number[];
+  change_order_ids: number[];
+  double_count_risk: boolean;
+  fully_de_risked: boolean;
+};
+
+export type NetExposureReport = {
+  project_id: number;
+  items: ExposureRow[];
+  totals: {
+    gross_claim_impact: number | null;
+    approved_co_recovery: number | null;
+    net_exposure: number | null;
+    double_count_activities: number;
+  };
+  viewer_role: Role;
+  money_visible: boolean;
 };
 
 export type ChangeOrderDraft = {
@@ -403,7 +437,11 @@ export type ClaimSummary = {
   opened_at: string;
   impact_days: number;
   cod_shift_days: number;
+  linked_activity_id: string | null;
   impact_value: number | null;
+  co_offset_value: number | null;
+  net_impact_value: number | null;
+  double_count_flag: boolean;
   statement_of_facts: string | null;
   approval_id: number | null;
   status: string;

@@ -93,6 +93,11 @@ class DelayClaim(Base):
     permit_id: Mapped[int | None] = mapped_column(ForeignKey("permit_status.id"), nullable=True)
     idle_event_id: Mapped[int | None] = mapped_column(ForeignKey("idle_events.id"), nullable=True, index=True)
 
+    # Activity linkage — populated by the harvester so the Convergence
+    # Service can reconcile the claim against approved Change Orders that
+    # cover the same scope.
+    linked_activity_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+
     subject_kind: Mapped[str] = mapped_column(String(16), default="rfc")  # rfc | permit
     subject_ref: Mapped[str] = mapped_column(String(128), default="")     # e.g. drawing_no
 
@@ -103,7 +108,13 @@ class DelayClaim(Base):
     communications: Mapped[list[dict]] = mapped_column(JSON, default=list)
     impact_days: Mapped[float] = mapped_column(Float, default=0)
     cod_shift_days: Mapped[float] = mapped_column(Float, default=0)
-    impact_value: Mapped[float] = mapped_column(Numeric(18, 2), default=0)  # masked
+    impact_value: Mapped[float] = mapped_column(Numeric(18, 2), default=0)  # gross, masked
+
+    # Convergence of Truth — a CO approved on the same activity offsets the
+    # claim. The auditor maintains these so the SoF and CFO dashboard never
+    # double-count damages already converted into approved scope.
+    co_offset_value: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
+    double_count_flag: Mapped[bool] = mapped_column(default=False)
 
     statement_of_facts: Mapped[str | None] = mapped_column(String(16000), nullable=True)
     approval_id: Mapped[int | None] = mapped_column(

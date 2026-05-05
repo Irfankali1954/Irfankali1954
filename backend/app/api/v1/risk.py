@@ -29,6 +29,7 @@ class SimulateRfcMissIn(BaseModel):
     days_overdue: int = 7
     idle_crew: int = 12
     crew_burdened_rate: float = 120.0
+    linked_activity_id: str | None = None
 
 
 class SimulatePermitDelayIn(BaseModel):
@@ -36,6 +37,7 @@ class SimulatePermitDelayIn(BaseModel):
     days_overdue: int = 7
     idle_crew: int = 18
     crew_burdened_rate: float = 130.0
+    linked_activity_id: str | None = None
 
 
 class FactorsOut(BaseModel):
@@ -216,6 +218,7 @@ def simulate_rfc_miss(
             days_overdue=payload.days_overdue,
             idle_crew=payload.idle_crew,
             crew_burdened_rate=payload.crew_burdened_rate,
+            linked_activity_id=payload.linked_activity_id,
         )
     except LookupError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "rfc drawing not found")
@@ -260,6 +263,7 @@ def simulate_permit_delay(
             days_overdue=payload.days_overdue,
             idle_crew=payload.idle_crew,
             crew_burdened_rate=payload.crew_burdened_rate,
+            linked_activity_id=payload.linked_activity_id,
         )
     except LookupError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "permit not found")

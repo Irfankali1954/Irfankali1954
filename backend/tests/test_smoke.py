@@ -614,6 +614,172 @@ def test_markup_masking_for_non_cfo_viewer():
     assert sub_view.proposed_value is None     # closed book
 
 
+# ---------- Convergence of Truth -------------------------------------------
+
+def _make_approved_co(db, *, activity_id="CIV-1040", direct_cost=200_000.0,
+                      markup_pct=15.0, co_number="CO-CONVRG"):
+    """Minimal helper that creates a CO and walks it to status='approved'."""
+    from datetime import datetime as _dt, timezone as _tz
+    from app.models.change_order import ChangeOrder
+    from app.models.financial import GatekeeperApproval
+    from app.services import cfo_gatekeeper, change_order_sentinel
+
+    co = ChangeOrder(
+        project_id=1, co_number=co_number,
+        title="Reroute storm drain around grade beam",
+        description="", originator_org="LocalCivilSub",
+        originator_email="sub@civil.local", contract_clause="GC-12.4",
+        discovered_at=_dt.now(_tz.utc),
+        notice_period_days=7, claim_period_days=21,
+        linked_activity_id=activity_id,
+        direct_cost=direct_cost,
+    )
+    change_order_sentinel.compute_deadlines(co)
+    db.add(co); db.flush()
+    change_order_sentinel.apply_markup(db, co, markup_pct=markup_pct, actor_email="cfo@x")
+    co.notice_sent_at = _dt.now(_tz.utc)
+    co.claim_filed_at = _dt.now(_tz.utc)
+    co.status = "claim_filed"
+    db.flush()
+
+    approval = cfo_gatekeeper.open_approval(
+        db, project_id=1, subject_type="change_order", subject_id=co.id,
+        amount=float(co.proposed_value or 0),
+    )
+    co.cfo_approval_id = approval.id
+    cfo_gatekeeper.decide(db, approval.id, decision="approve",
+                          cfo_email="cfo@x", notes="approved for test")
+    co.status = "approved"
+    db.commit(); db.refresh(co)
+    return co
+
+
+def test_compute_for_activity_subtracts_approved_co():
+    from app.models.risk import DelayClaim
+    from app.services import convergence_service, wrap_risk
+
+    db = _fresh_db()
+
+    # 1. Approve a CO worth $230k on CIV-1040 (200k direct + 15% markup).
+    co = _make_approved_co(db, activity_id="CIV-1040", direct_cost=200_000.0,
+                           markup_pct=15.0)
+    assert float(co.proposed_value) == 230_000.0
+
+    # 2. Spawn a delay claim against CIV-1040 with a known impact.
+    sim = wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=4, idle_crew=10, crew_burdened_rate=120.0,
+        linked_activity_id="CIV-1040",
+    )
+    claim = db.get(DelayClaim, sim.claim_id)
+    gross = float(claim.impact_value or 0)
+    assert gross > 0
+    assert claim.linked_activity_id == "CIV-1040"
+
+    expo = convergence_service.compute_for_activity(db, 1, "CIV-1040")
+    assert expo.gross_claim_impact == gross
+    assert expo.approved_co_recovery == 230_000.0
+    assert expo.net_exposure == max(0.0, gross - 230_000.0)
+    assert expo.double_count_risk is True
+    assert expo.fully_de_risked == (230_000.0 >= gross)
+
+
+def test_reconcile_distributes_offset_and_persists_on_claim():
+    from app.models.risk import DelayClaim
+    from app.services import convergence_service, wrap_risk
+
+    db = _fresh_db()
+    _make_approved_co(db, activity_id="CIV-1040", direct_cost=200_000.0,
+                      markup_pct=10.0)  # proposed_value = $220k
+
+    sim = wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=4, idle_crew=10, crew_burdened_rate=120.0,
+        linked_activity_id="CIV-1040",
+    )
+    claim = db.get(DelayClaim, sim.claim_id)
+    db.refresh(claim)
+
+    # Harvester already triggered reconcile; verify the offset persisted.
+    expo = convergence_service.compute_for_activity(db, 1, "CIV-1040")
+    expected_offset = min(float(claim.impact_value or 0), expo.approved_co_recovery)
+    assert float(claim.co_offset_value or 0) == expected_offset
+
+
+def test_double_count_flag_and_tier_3_alert_for_overlapping_co():
+    from app.connectors import twilio_sns
+    from app.models.notification import Notification
+    from app.models.risk import DelayClaim
+    from app.services import wrap_risk
+    twilio_sns.SENT.clear()
+
+    db = _fresh_db()
+    _seed_recipients(db)
+    _make_approved_co(db, activity_id="CIV-1040", direct_cost=200_000.0)
+
+    sim = wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=2, idle_crew=8, crew_burdened_rate=110.0,
+        linked_activity_id="CIV-1040",
+    )
+    claim = db.get(DelayClaim, sim.claim_id)
+    assert claim.double_count_flag is True
+
+    # Tier-3 nuclear alert with the convergence trigger.
+    nukes = (db.query(Notification)
+               .filter(Notification.tier == "tier_3")
+               .filter(Notification.trigger == "convergence:double_count").all())
+    assert nukes, "double-count must fire a tier_3 notification"
+    assert "+15555550103" in {m["to"] for m in twilio_sns.SENT}, \
+        "CEO must be SMS'd on a double-count finding"
+
+
+def test_co_approval_re_reconciles_existing_claims():
+    """A claim drafted before the CO is approved must get re-offset
+    the moment the CO flips to approved."""
+    from app.models.risk import DelayClaim
+    from app.services import wrap_risk, convergence_service
+
+    db = _fresh_db()
+
+    # Claim first (no CO yet).
+    sim = wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=4, idle_crew=10, crew_burdened_rate=120.0,
+        linked_activity_id="CIV-1040",
+    )
+    claim = db.get(DelayClaim, sim.claim_id)
+    assert float(claim.co_offset_value or 0) == 0.0
+    assert claim.double_count_flag is False
+
+    # Now approve a CO on the same activity.
+    co = _make_approved_co(db, activity_id="CIV-1040", direct_cost=100_000.0,
+                           markup_pct=20.0)  # proposed_value = $120k
+    convergence_service.reconcile_for_change_order(db, co)
+    db.refresh(claim)
+
+    expected = min(float(claim.impact_value or 0), 120_000.0)
+    assert float(claim.co_offset_value or 0) == expected
+
+
+def test_sof_renders_offset_block_when_co_offsets_claim():
+    from app.models.risk import DelayClaim
+    from app.services import wrap_risk
+
+    db = _fresh_db()
+    _make_approved_co(db, activity_id="CIV-1040", direct_cost=200_000.0,
+                      markup_pct=15.0)
+    sim = wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=3, idle_crew=10, crew_burdened_rate=120.0,
+        linked_activity_id="CIV-1040",
+    )
+    claim = db.get(DelayClaim, sim.claim_id)
+    sof = claim.statement_of_facts or ""
+    assert "### 2.5" in sof
+    assert "Approved Change Order recovery" in sof or "Double-count" in sof
+
+
 def test_management_comment_persisted_for_idle_event():
     from app.models.comment import ManagementComment
     from app.models.risk import DelayClaim

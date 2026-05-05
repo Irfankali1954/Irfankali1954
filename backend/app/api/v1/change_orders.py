@@ -316,6 +316,16 @@ def approve(
         payload={"proposed_value": float(co.proposed_value or 0)},
     )
     db.commit()
+
+    # Convergence of Truth — the moment a CO is approved, every active
+    # claim on the same activity must be re-reconciled so the books
+    # reflect the real net exposure for the next bank audit.
+    try:
+        from app.services import convergence_service
+        convergence_service.reconcile_for_change_order(db, co)
+    except Exception:  # pragma: no cover
+        pass
+
     db.refresh(co)
     return _to_out(co, user)
 

@@ -227,6 +227,7 @@ def simulate_rfc_miss(
     crew_burdened_rate: float = 120.0,
     equipment: list[tuple[str, float]] | None = None,
     auto_draft_claim: bool = True,
+    linked_activity_id: str | None = None,
 ) -> SimulationResult:
     """Apply a synthetic RFC miss, recompute, return before/after.
 
@@ -269,7 +270,9 @@ def simulate_rfc_miss(
     if auto_draft_claim:
         # Local import to avoid a service-level circular dependency.
         from app.services import claim_harvester
-        claim = claim_harvester.harvest_for_idle_event(db, idle_event.id)
+        claim = claim_harvester.harvest_for_idle_event(
+            db, idle_event.id, linked_activity_id=linked_activity_id,
+        )
         claim_id = claim.id
         approval_id = claim.approval_id
 
@@ -295,6 +298,7 @@ def simulate_permit_delay(
     crew_burdened_rate: float = 130.0,
     equipment: list[tuple[str, float]] | None = None,
     auto_draft_claim: bool = True,
+    linked_activity_id: str | None = None,
 ) -> SimulationResult:
     """Permit-delay sibling of :func:`simulate_rfc_miss`.
 
@@ -336,7 +340,9 @@ def simulate_permit_delay(
     approval_id: int | None = None
     if auto_draft_claim:
         from app.services import claim_harvester
-        claim = claim_harvester.harvest_for_idle_event(db, idle_event.id)
+        claim = claim_harvester.harvest_for_idle_event(
+            db, idle_event.id, linked_activity_id=linked_activity_id,
+        )
         claim_id = claim.id
         approval_id = claim.approval_id
 
