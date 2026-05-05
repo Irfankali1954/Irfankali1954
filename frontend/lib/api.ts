@@ -245,6 +245,110 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ target_kind: kind, target_id: id, body }),
     }),
+
+  // Change Orders
+  listChangeOrders: (projectId: number) =>
+    req<ChangeOrderRow[]>(`/change-orders?project_id=${projectId}`),
+
+  draftChangeOrder: (body: ChangeOrderDraft) =>
+    req<ChangeOrderRow>("/change-orders", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  sentinelSnapshot: (projectId: number) =>
+    req<{
+      project_id: number;
+      evaluated_at: string;
+      items: AgingItem[];
+      notifications_fired: number;
+    }>(`/change-orders/aging?project_id=${projectId}`),
+
+  sentinelScan: (projectId: number) =>
+    req<{
+      project_id: number;
+      evaluated_at: string;
+      items: AgingItem[];
+      notifications_fired: number;
+    }>(`/change-orders/sentinel/scan?project_id=${projectId}`, { method: "POST" }),
+
+  sendCONotice: (id: number, counterparty_email?: string) =>
+    req<ChangeOrderRow>(`/change-orders/${id}/notice`, {
+      method: "POST",
+      body: JSON.stringify({ counterparty_email: counterparty_email ?? null }),
+    }),
+
+  fileCOClaim: (id: number, cover_note?: string) =>
+    req<ChangeOrderRow>(`/change-orders/${id}/file-claim`, {
+      method: "POST",
+      body: JSON.stringify({ cover_note: cover_note ?? null }),
+    }),
+
+  setCOMarkup: (id: number, markup_pct: number) =>
+    req<ChangeOrderRow>(`/change-orders/${id}/markup`, {
+      method: "PUT",
+      body: JSON.stringify({ markup_pct }),
+    }),
+
+  approveCO: (id: number) =>
+    req<ChangeOrderRow>(`/change-orders/${id}/approve`, { method: "POST" }),
+};
+
+export type ChangeOrderDraft = {
+  project_id: number;
+  co_number: string;
+  title: string;
+  description?: string;
+  originator_org: string;
+  contract_clause?: string;
+  linked_activity_id: string;
+  estimated_duration_impact_days?: number;
+  direct_cost?: number;
+  notice_period_days?: number;
+  claim_period_days?: number;
+};
+
+export type ChangeOrderRow = {
+  id: number;
+  project_id: number;
+  co_number: string;
+  title: string;
+  description: string;
+  originator_org: string;
+  originator_email: string;
+  contract_clause: string;
+  source: string;
+  discovered_at: string;
+  notice_period_days: number;
+  claim_period_days: number;
+  notice_due_by: string;
+  claim_due_by: string;
+  notice_sent_at: string | null;
+  claim_filed_at: string | null;
+  linked_activity_id: string;
+  estimated_duration_impact_days: number;
+  on_critical_path: boolean;
+  cpm_assessed_at: string | null;
+  direct_cost: number | null;
+  markup_pct: number | null;
+  markup_value: number | null;
+  proposed_value: number | null;
+  cfo_approval_id: number | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgingItem = {
+  change_order_id: number;
+  co_number: string;
+  title: string;
+  status: string;
+  deadline: string;
+  deadline_kind: "notice" | "claim";
+  seconds_remaining: number;
+  on_critical_path: boolean;
+  severity: "ok" | "approaching" | "missed";
 };
 
 export type NotificationFeedItem = {

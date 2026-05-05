@@ -446,6 +446,174 @@ def test_ingest_health_flags_missing_permit_due_date():
 
 # ---------- Management comments ------------------------------------------
 
+# ---------- Change Order Sentinel ------------------------------------------
+
+def _make_change_order(db, *, discovered_days_ago=0, notice_days=7, claim_days=21,
+                       activity_id="CIV-1040", direct_cost=100_000.0, on_cp=False):
+    from datetime import datetime as _dt, timedelta, timezone as _tz
+    from app.models.change_order import ChangeOrder
+    from app.models.schedule import CriticalPathSnapshot
+    from app.services import change_order_sentinel
+
+    discovered = _dt.now(_tz.utc) - timedelta(days=discovered_days_ago)
+    co = ChangeOrder(
+        project_id=1, co_number=f"CO-{discovered_days_ago:03d}",
+        title="Reroute storm drain around grade beam",
+        description="", originator_org="LocalCivilSub",
+        originator_email="sub@civil.local", contract_clause="GC-12.4",
+        discovered_at=discovered,
+        notice_period_days=notice_days, claim_period_days=claim_days,
+        linked_activity_id=activity_id,
+        direct_cost=direct_cost,
+    )
+    change_order_sentinel.compute_deadlines(co)
+    db.add(co); db.flush()
+
+    snap = (db.query(CriticalPathSnapshot)
+              .filter(CriticalPathSnapshot.project_id == 1)
+              .order_by(CriticalPathSnapshot.computed_at.desc()).first())
+    if snap is not None:
+        snap.critical_activity_ids = [activity_id] if on_cp else []
+    change_order_sentinel.assess_critical_path(db, co)
+    db.commit(); db.refresh(co)
+    return co
+
+
+def test_change_order_deadlines_derived_from_discovered_at():
+    from app.services import change_order_sentinel
+    db = _fresh_db()
+    co = _make_change_order(db, discovered_days_ago=0)
+    delta_notice = (co.notice_due_by - co.discovered_at).days
+    delta_claim = (co.claim_due_by - co.discovered_at).days
+    assert delta_notice == 7
+    assert delta_claim == 21
+
+
+def test_aging_classifier_buckets():
+    from app.services.change_order_sentinel import classify
+    db = _fresh_db()
+    fresh = _make_change_order(db, discovered_days_ago=0)
+    assert classify(fresh).severity == "ok"
+    assert classify(fresh).deadline_kind == "notice"
+
+    aging = _make_change_order(db, discovered_days_ago=6, notice_days=7)  # ~1 day left
+    assert classify(aging).severity == "approaching"
+
+    bar = _make_change_order(db, discovered_days_ago=10, notice_days=7)
+    assert classify(bar).severity == "missed"
+
+
+def test_missed_notice_fires_tier_3_text_the_ceo():
+    from app.connectors import twilio_sns, email_smtp
+    from app.models.notification import Notification
+    from app.services import change_order_sentinel
+    twilio_sns.SENT.clear(); email_smtp.SENT.clear()
+
+    db = _fresh_db()
+    _seed_recipients(db)
+    _make_change_order(db, discovered_days_ago=10, notice_days=7)
+
+    items, fired = change_order_sentinel.scan(db, project_id=1, trigger="test")
+    assert fired >= 1
+    assert any(i.severity == "missed" for i in items)
+
+    nukes = (db.query(Notification)
+               .filter(Notification.tier == "tier_3")
+               .filter(Notification.trigger.like("co_aging:%")).all())
+    assert nukes, "missed time-bar must fire a tier_3 notification"
+
+    sms_targets = {m["to"] for m in twilio_sns.SENT}
+    assert "+15555550103" in sms_targets, "CEO must be SMS'd on a time-bar breach"
+
+
+def test_approaching_notice_on_critical_path_escalates_to_tier_3():
+    from app.connectors import twilio_sns
+    from app.models.notification import Notification
+    from app.services import change_order_sentinel
+    twilio_sns.SENT.clear()
+
+    db = _fresh_db()
+    _seed_recipients(db)
+    _make_change_order(db, discovered_days_ago=6, notice_days=7,
+                       activity_id="CIV-1040", on_cp=True)
+
+    change_order_sentinel.scan(db, project_id=1, trigger="test")
+    nukes = (db.query(Notification)
+               .filter(Notification.tier == "tier_3")
+               .filter(Notification.trigger.like("co_aging:%")).all())
+    assert nukes, "approaching CO on critical path must escalate to nuclear"
+
+
+def test_approaching_notice_off_critical_path_is_only_tier_2():
+    from app.connectors import twilio_sns
+    from app.models.notification import Notification
+    from app.services import change_order_sentinel
+    twilio_sns.SENT.clear()
+
+    db = _fresh_db()
+    _seed_recipients(db)
+    _make_change_order(db, discovered_days_ago=6, notice_days=7,
+                       activity_id="CIV-1040", on_cp=False)
+
+    change_order_sentinel.scan(db, project_id=1, trigger="test")
+    notes = (db.query(Notification)
+               .filter(Notification.trigger.like("co_aging:%")).all())
+    assert all(n.tier != "tier_3" for n in notes), \
+        "approaching off-CP must NOT escalate to nuclear"
+    assert any(n.tier == "tier_2" for n in notes)
+    assert twilio_sns.SENT == [], "tier 2 must never SMS"
+
+
+def test_markup_masking_for_non_cfo_viewer():
+    from app.core.rbac import (
+        FinancialField, TechnicalRole, VisibilityPolicy, default_visibility_policy,
+    )
+    from app.schemas.change_order import ChangeOrderOut
+    from app.services import change_order_sentinel, margin_mask
+
+    db = _fresh_db()
+    co = _make_change_order(db, direct_cost=100_000.0)
+    change_order_sentinel.apply_markup(db, co, markup_pct=15.0, actor_email="cfo@x")
+    db.commit(); db.refresh(co)
+    assert float(co.markup_value) == 15_000.0
+    assert float(co.proposed_value) == 115_000.0
+
+    out = ChangeOrderOut.model_validate(co, from_attributes=True)
+    margin_mask.set_policy(default_visibility_policy())
+
+    # CFO sees everything by the default policy — including the markup.
+    cfo_view = margin_mask.apply_visibility(out, TechnicalRole.CFO)
+    assert cfo_view.markup_value == 15_000.0
+
+    # Subcontractor sees nothing by default — must NOT see direct or markup.
+    sub_view = margin_mask.apply_visibility(out, TechnicalRole.SUBCONTRACTOR)
+    assert sub_view.direct_cost is None
+    assert sub_view.markup_value is None
+    assert sub_view.proposed_value is None
+
+    # Now flip to "open book on cost, closed book on markup" — the canonical
+    # CO posture for subcontractor visibility.
+    pol = VisibilityPolicy(allowed={
+        TechnicalRole.CFO: frozenset({
+            FinancialField.CHANGE_ORDER_DIRECT_COST,
+            FinancialField.CHANGE_ORDER_MARKUP,
+            FinancialField.CHANGE_ORDER_TOTAL,
+        }),
+        TechnicalRole.SUBCONTRACTOR: frozenset({FinancialField.CHANGE_ORDER_DIRECT_COST}),
+    })
+    margin_mask.set_policy(pol)
+
+    cfo_view = margin_mask.apply_visibility(out, TechnicalRole.CFO)
+    assert cfo_view.markup_value == 15_000.0
+    assert cfo_view.proposed_value == 115_000.0
+    assert cfo_view.direct_cost == 100_000.0
+
+    sub_view = margin_mask.apply_visibility(out, TechnicalRole.SUBCONTRACTOR)
+    assert sub_view.direct_cost == 100_000.0   # open book
+    assert sub_view.markup_value is None       # closed book
+    assert sub_view.proposed_value is None     # closed book
+
+
 def test_management_comment_persisted_for_idle_event():
     from app.models.comment import ManagementComment
     from app.models.risk import DelayClaim

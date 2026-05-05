@@ -249,6 +249,94 @@ def _fanout(db: Session, notif: Notification, tier: Tier) -> list[dict]:
     return dispatched
 
 
+def evaluate_change_order_alert(
+    db: Session,
+    *,
+    change_order_id: int,
+    deadline_kind: str,         # "notice" | "claim"
+    severity: str,              # "approaching" | "missed"
+    seconds_remaining: float,
+    on_critical_path: bool,
+    trigger: str = "sentinel",
+) -> Notification | None:
+    """Aging-clock notification path for the Change Order Sentinel.
+
+    Tier mapping is *intentionally stricter* than the generic CPM-drift
+    bus, because a missed time-bar permanently forfeits recovery rights:
+
+    * ``missed``                   → **Tier 3** (text the CEO).
+    * ``approaching`` on critical path → **Tier 3** (a missed CO on the
+      critical path is a wrap-killer; we do not let it slip).
+    * ``approaching`` off critical path → **Tier 2** (email PD/CFO).
+
+    Dedupe key is ``co:{id}:{kind}:{severity}:hour-bucket`` so a 7-day
+    aging window doesn't spam — one alert per hour per state change.
+    """
+    from app.models.change_order import ChangeOrder  # avoid circular import
+
+    co = db.get(ChangeOrder, change_order_id)
+    if co is None:
+        return None
+
+    if severity == "missed":
+        tier = Tier.NUCLEAR
+    elif severity == "approaching" and on_critical_path:
+        tier = Tier.NUCLEAR
+    elif severity == "approaching":
+        tier = Tier.URGENT
+    else:
+        return None
+
+    # Hour-bucket dedupe so we don't re-alert every minute on the same state.
+    hour_bucket = int(datetime.now(timezone.utc).timestamp() // 3600)
+    key = f"co:{co.id}:{deadline_kind}:{severity}:{hour_bucket}"
+    if _recently_fired(db, key, within=timedelta(hours=1)):
+        return None
+
+    days_left = max(0.0, seconds_remaining / 86_400.0)
+    label = "TIME BAR" if severity == "missed" else "AGING"
+    cp_tag = " · CRITICAL PATH" if on_critical_path else ""
+    subject = (
+        f"[{tier.value.upper()} · {label}] CO {co.co_number} — "
+        f"{deadline_kind} deadline {'missed' if severity == 'missed' else f'in {days_left:.1f}d'}"
+        f"{cp_tag}"
+    )
+    body = (
+        f"Change Order: {co.co_number} — {co.title}\n"
+        f"Linked activity: {co.linked_activity_id} (critical={on_critical_path})\n"
+        f"Originator: {co.originator_org}\n"
+        f"Status: {co.status}\n"
+        f"{deadline_kind.title()} due: {co.notice_due_by if deadline_kind == 'notice' else co.claim_due_by}\n"
+        f"Severity: {severity}\n"
+    )
+    if severity == "missed":
+        body += (
+            "\n** TIME BAR BREACH **\n"
+            f"The {deadline_kind} deadline has passed without action. Under the "
+            "master agreement this may forfeit the contractor's right to "
+            "recovery on this change. Confirm with counsel immediately.\n"
+        )
+
+    notif = Notification(
+        project_id=co.project_id,
+        tier=tier.value,
+        trigger=f"co_aging:{trigger}",
+        subject=subject,
+        body=body,
+        cpm_drift_days=days_left,
+        open_idle_cost=0.0,
+        idle_event_id=None,
+        claim_id=None,
+        dedupe_key=key,
+    )
+    db.add(notif)
+    db.flush()
+    notif.dispatched_to = _fanout(db, notif, tier)
+    db.commit()
+    db.refresh(notif)
+    return notif
+
+
 def evaluate_for_project(
     db: Session,
     project_id: int,

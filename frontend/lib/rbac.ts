@@ -14,6 +14,7 @@ export const NAV_ITEMS: { href: string; label: string; roles: Role[] }[] = [
   { href: "/schedule",       label: "Schedule",           roles: ["admin", "project_director", "epc_manager", "site_manager", "civil_engineer", "subcontractor", "supplier"] },
   { href: "/risk",           label: "Wrap Risk",          roles: ["admin", "cfo", "project_director", "epc_manager"] },
   { href: "/claims",         label: "Delay Claims",       roles: ["cfo", "project_director", "epc_manager"] },
+  { href: "/change-orders",  label: "Change Orders",      roles: ["cfo", "project_director", "epc_manager", "subcontractor"] },
   { href: "/messages",       label: "Messages",           roles: ["admin", "cfo", "project_director", "epc_manager", "site_manager", "civil_engineer", "subcontractor", "supplier"] },
   { href: "/admin",          label: "Admin",              roles: ["admin"] },
 ];

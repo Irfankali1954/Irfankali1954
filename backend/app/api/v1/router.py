@@ -1,7 +1,8 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
-    admin, auth, cfo, claims, comments, erp, messaging, notifications, risk, scheduler,
+    admin, auth, cfo, change_orders, claims, comments, erp, messaging,
+    notifications, risk, scheduler,
 )
 
 api_router = APIRouter()
@@ -15,3 +16,4 @@ api_router.include_router(messaging.router, prefix="/messages", tags=["messaging
 api_router.include_router(claims.router, prefix="/claims", tags=["claims"])
 api_router.include_router(notifications.router, prefix="/notifications", tags=["notifications"])
 api_router.include_router(comments.router, prefix="/comments", tags=["comments"])
+api_router.include_router(change_orders.router, prefix="/change-orders", tags=["change-orders"])

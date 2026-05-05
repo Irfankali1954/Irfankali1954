@@ -51,6 +51,12 @@ class Permission(str, Enum):
     # Management feedback
     MGMT_COMMENT_WRITE = "mgmt_comment:write"
 
+    # Change Order Sentinel
+    CHANGE_ORDER_DRAFT = "change_order:draft"
+    CHANGE_ORDER_NOTICE_SEND = "change_order:notice_send"
+    CHANGE_ORDER_MARKUP_WRITE = "change_order:markup_write"  # CFO only
+    CHANGE_ORDER_APPROVE = "change_order:approve"            # CFO only
+
 
 # Default tech-permission matrix. Admin can edit at runtime via /admin/roles.
 DEFAULT_PERMISSIONS: dict[TechnicalRole, set[Permission]] = {
@@ -62,6 +68,10 @@ DEFAULT_PERMISSIONS: dict[TechnicalRole, set[Permission]] = {
         Permission.RISK_READ,
         Permission.RISK_RECALC,
         Permission.MGMT_COMMENT_WRITE,
+        Permission.CHANGE_ORDER_DRAFT,
+        Permission.CHANGE_ORDER_NOTICE_SEND,
+        Permission.CHANGE_ORDER_MARKUP_WRITE,
+        Permission.CHANGE_ORDER_APPROVE,
     },
     TechnicalRole.PROJECT_DIRECTOR: {
         Permission.RISK_READ,
@@ -70,12 +80,16 @@ DEFAULT_PERMISSIONS: dict[TechnicalRole, set[Permission]] = {
         Permission.SCHEDULE_WRITE,
         Permission.DELAY_CLAIM_FILE,
         Permission.MGMT_COMMENT_WRITE,
+        Permission.CHANGE_ORDER_DRAFT,
+        Permission.CHANGE_ORDER_NOTICE_SEND,
     },
     TechnicalRole.EPC_MANAGER: {
         Permission.SCHEDULE_WRITE,
         Permission.RISK_READ,
         Permission.DAILY_LOG_SUBMIT,
         Permission.DELAY_CLAIM_FILE,
+        Permission.CHANGE_ORDER_DRAFT,
+        Permission.CHANGE_ORDER_NOTICE_SEND,
     },
     TechnicalRole.SITE_MANAGER: {
         Permission.DAILY_LOG_SUBMIT,
@@ -89,6 +103,7 @@ DEFAULT_PERMISSIONS: dict[TechnicalRole, set[Permission]] = {
     },
     TechnicalRole.SUBCONTRACTOR: {
         Permission.DAILY_LOG_SUBMIT,
+        Permission.CHANGE_ORDER_DRAFT,
     },
     TechnicalRole.SUPPLIER: {
         Permission.DAILY_LOG_SUBMIT,
@@ -114,6 +129,9 @@ class FinancialField(str, Enum):
     REVENUE = "revenue"
     FIELD_IDLE_COST = "field_idle_cost"
     DELAY_CLAIM_VALUE = "delay_claim_value"
+    CHANGE_ORDER_DIRECT_COST = "co_direct_cost"
+    CHANGE_ORDER_MARKUP = "co_markup"     # the "internal markup" on a CO
+    CHANGE_ORDER_TOTAL = "co_total"       # direct + markup, masked together
 
     @classmethod
     def display(cls, f: "FinancialField") -> str:
@@ -132,6 +150,9 @@ _DISPLAY = {
     FinancialField.REVENUE: "Revenue",
     FinancialField.FIELD_IDLE_COST: "Field Idle Cost",
     FinancialField.DELAY_CLAIM_VALUE: "Delay Claim Value",
+    FinancialField.CHANGE_ORDER_DIRECT_COST: "Change Order — Direct Cost",
+    FinancialField.CHANGE_ORDER_MARKUP: "Change Order — Internal Markup",
+    FinancialField.CHANGE_ORDER_TOTAL: "Change Order — Proposed Total",
 }
 
 

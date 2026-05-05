@@ -94,4 +94,12 @@ def recompute(db: Session, project_id: int, *, trigger: str = "manual") -> Criti
         # block the schedule recompute itself
         pass
 
+    # Change Order Sentinel: a CPM shift can move activities on/off the
+    # critical path. Re-classify and fire any new alerts.
+    try:
+        from app.services import change_order_sentinel
+        change_order_sentinel.scan(db, project_id, trigger=f"cpm_recompute:{trigger}")
+    except Exception:  # pragma: no cover
+        pass
+
     return snap
