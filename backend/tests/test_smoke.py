@@ -780,6 +780,169 @@ def test_sof_renders_offset_block_when_co_offsets_claim():
     assert "Approved Change Order recovery" in sof or "Double-count" in sof
 
 
+# ---------- Phase 8: Risk Attribution + Heatmap + Reverse de-risk ----------
+
+def test_reverse_de_risk_releases_offset_when_co_rejected():
+    from app.models.financial import GatekeeperApproval
+    from app.models.risk import DelayClaim
+    from app.services import cfo_gatekeeper, convergence_service, wrap_risk
+
+    db = _fresh_db()
+    co = _make_approved_co(db, activity_id="CIV-1040", direct_cost=200_000.0,
+                           markup_pct=15.0)  # proposed = $230k
+    sim = wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=4, idle_crew=10, crew_burdened_rate=120.0,
+        linked_activity_id="CIV-1040",
+    )
+    claim = db.get(DelayClaim, sim.claim_id)
+    db.refresh(claim)
+    initial_offset = float(claim.co_offset_value or 0)
+    assert initial_offset > 0, "claim must be offset before we test the release"
+
+    # Now reject the CO (simulate the API path that reconciles).
+    approval = db.get(GatekeeperApproval, co.cfo_approval_id)
+    cfo_gatekeeper.decide(db, approval.id, decision="reject",
+                          cfo_email="cfo@x", notes="post-hoc rejection")
+    co.status = "rejected"
+    db.commit()
+    convergence_service.reconcile_for_change_order(db, co)
+    db.refresh(claim)
+
+    # Offset must have been released.
+    assert float(claim.co_offset_value or 0) == 0.0
+
+
+def test_risk_attribution_decomposes_loss_to_activities():
+    """Per-activity impacts must sum (within rounding) to the claim-relevant
+    portion of the project-level score loss."""
+    from app.services import risk_attribution, wrap_risk
+
+    db = _fresh_db()
+    sim = wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=10, idle_crew=20, crew_burdened_rate=140.0,
+        linked_activity_id="CIV-1040",
+    )
+
+    attrs = risk_attribution.attribute_for_project(db, project_id=1)
+    assert attrs, "attribution must produce at least one row"
+    civ = next((a for a in attrs if a.activity_id == "CIV-1040"), None)
+    assert civ is not None
+    # The simulation overdued an RFC and built idle cost — both must
+    # contribute to this activity's drag.
+    assert civ.rfc_loss > 0, "RFC severity decay must contribute to CIV-1040"
+    assert civ.idle_loss > 0, "idle cost on this activity must contribute"
+    assert civ.risk_impact > 0
+    # Risk impact must not exceed the maximum possible loss (100 points).
+    assert 0 < civ.risk_impact <= 100.0
+
+
+def test_risk_attribution_clamps_factor_loss_at_one():
+    """Even an apocalyptic miss cannot push a single factor's per-activity
+    contribution above 1.0 (it can max out the factor, not exceed it)."""
+    from app.services import risk_attribution, wrap_risk
+
+    db = _fresh_db()
+    wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=365, idle_crew=500, crew_burdened_rate=10_000.0,
+        linked_activity_id="CIV-1040",
+    )
+    attrs = risk_attribution.attribute_for_project(db, project_id=1)
+    civ = next((a for a in attrs if a.activity_id == "CIV-1040"), None)
+    assert civ is not None
+    assert 0.0 <= civ.idle_loss <= 1.0
+    assert 0.0 <= civ.rfc_loss <= 1.0
+    assert 0.0 <= civ.permit_loss <= 1.0
+    assert 0.0 <= civ.schedule_loss <= 1.0
+
+
+def test_heatmap_classifies_into_correct_quadrant():
+    from app.services import risk_heatmap, wrap_risk
+
+    db = _fresh_db()
+    # Big enough to push both risk and exposure over thresholds.
+    wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=14, idle_crew=30, crew_burdened_rate=200.0,
+        linked_activity_id="CIV-1040",
+    )
+    cells = risk_heatmap.evaluate(db, project_id=1, fire_alerts=False)
+    civ = next((c for c in cells if c.activity_id == "CIV-1040"), None)
+    assert civ is not None
+    assert civ.quadrant == "HH", \
+        f"large RFC miss + idle cost must land in HH, got {civ.quadrant}"
+
+
+def test_heatmap_dwell_alert_fires_only_after_48h():
+    from datetime import datetime, timedelta, timezone as _tz
+
+    from app.connectors import twilio_sns
+    from app.models.heatmap import HeatmapPosition
+    from app.models.notification import Notification
+    from app.services import risk_heatmap, wrap_risk
+    twilio_sns.SENT.clear()
+
+    db = _fresh_db()
+    _seed_recipients(db)
+    wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=14, idle_crew=30, crew_burdened_rate=200.0,
+        linked_activity_id="CIV-1040",
+    )
+
+    # First evaluation — fresh HH cell, no dwell alert yet.
+    cells = risk_heatmap.evaluate(db, project_id=1)
+    assert any(c.quadrant == "HH" for c in cells)
+    dwell = (db.query(Notification)
+               .filter(Notification.trigger.like("heatmap_dwell:%")).all())
+    assert dwell == [], "no dwell alert should fire on the first evaluation"
+
+    # Pre-age the position by 49 hours to simulate dwell.
+    pos = (db.query(HeatmapPosition)
+             .filter(HeatmapPosition.activity_id == "CIV-1040").first())
+    assert pos is not None
+    pos.entered_at = datetime.now(_tz.utc) - timedelta(hours=49)
+    db.commit()
+
+    twilio_sns.SENT.clear()
+    risk_heatmap.evaluate(db, project_id=1)
+    dwell = (db.query(Notification)
+               .filter(Notification.trigger.like("heatmap_dwell:%")).all())
+    assert dwell, "after 48h in HH the bus must fire a dwell alert"
+    assert dwell[0].tier == "tier_3"
+    assert "+15555550103" in {m["to"] for m in twilio_sns.SENT}, \
+        "CEO must be SMS'd on a 48h-stuck HH cell"
+
+
+def test_heatmap_dwell_alert_dedup_within_24h():
+    from datetime import datetime, timedelta, timezone as _tz
+
+    from app.models.heatmap import HeatmapPosition
+    from app.models.notification import Notification
+    from app.services import risk_heatmap, wrap_risk
+
+    db = _fresh_db()
+    _seed_recipients(db)
+    wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=14, idle_crew=30, crew_burdened_rate=200.0,
+        linked_activity_id="CIV-1040",
+    )
+    risk_heatmap.evaluate(db, project_id=1)
+    pos = (db.query(HeatmapPosition)
+             .filter(HeatmapPosition.activity_id == "CIV-1040").first())
+    pos.entered_at = datetime.now(_tz.utc) - timedelta(hours=49)
+    db.commit()
+
+    risk_heatmap.evaluate(db, project_id=1)
+    risk_heatmap.evaluate(db, project_id=1)  # second pass within 24h
+    dwell = (db.query(Notification)
+               .filter(Notification.trigger.like("heatmap_dwell:%")).all())
+    assert len(dwell) == 1, "dwell alert must dedupe within the cooldown window"
+
+
 def test_management_comment_persisted_for_idle_event():
     from app.models.comment import ManagementComment
     from app.models.risk import DelayClaim

@@ -330,7 +330,81 @@ def approve(
     return _to_out(co, user)
 
 
-# ---------- Accretive API: Procore push ------------------------------------
+@router.post(
+    "/{co_id}/reject",
+    response_model=ChangeOrderOut,
+    summary="Reject a Change Order (CFO only) — releases any prior offset",
+    description=(
+        "Flips the linked GatekeeperApproval to ``rejected`` and the CO to "
+        "``rejected``, then re-runs the Convergence reconcile so any "
+        "DelayClaim that was previously offset by this CO has its "
+        "``co_offset_value`` released. The Statement of Facts on those "
+        "claims is **not** auto-rewritten — the CFO does that explicitly "
+        "via the Convergence dashboard so the audit trail is deliberate."
+    ),
+    dependencies=[Depends(require_permission(Permission.CHANGE_ORDER_APPROVE))],
+)
+def reject(
+    co_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(require_permission(Permission.CHANGE_ORDER_APPROVE)),
+) -> ChangeOrderOut:
+    co = db.get(ChangeOrder, co_id)
+    if co is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "change order not found")
+    if co.cfo_approval_id is not None:
+        approval = db.get(GatekeeperApproval, co.cfo_approval_id)
+        if approval and approval.status == "pending":
+            cfo_gatekeeper.decide(
+                db, approval.id, decision="reject",
+                cfo_email=user.email, notes="CO rejected via /change-orders/{id}/reject",
+            )
+    co.status = "rejected"
+    change_order_sentinel.record_event(
+        db, co, event_type="rejected", actor_email=user.email,
+    )
+    db.commit()
+
+    # Reverse de-risk — once this CO is no longer ``approved`` it must stop
+    # offsetting any DelayClaim on the same activity.
+    try:
+        from app.services import convergence_service
+        convergence_service.reconcile_for_change_order(db, co)
+    except Exception:  # pragma: no cover
+        pass
+
+    db.refresh(co)
+    return _to_out(co, user)
+
+
+@router.post(
+    "/{co_id}/withdraw",
+    response_model=ChangeOrderOut,
+    summary="Withdraw a Change Order — also releases any prior offset",
+    dependencies=[Depends(require_permission(Permission.CHANGE_ORDER_NOTICE_SEND))],
+)
+def withdraw(
+    co_id: int,
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(require_permission(Permission.CHANGE_ORDER_NOTICE_SEND)),
+) -> ChangeOrderOut:
+    co = db.get(ChangeOrder, co_id)
+    if co is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "change order not found")
+    co.status = "withdrawn"
+    change_order_sentinel.record_event(
+        db, co, event_type="withdrawn", actor_email=user.email,
+    )
+    db.commit()
+
+    try:
+        from app.services import convergence_service
+        convergence_service.reconcile_for_change_order(db, co)
+    except Exception:  # pragma: no cover
+        pass
+
+    db.refresh(co)
+    return _to_out(co, user)
 
 
 @router.post(
