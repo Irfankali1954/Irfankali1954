@@ -31,7 +31,7 @@ from app.schemas.financial import (
     VisibilityPolicyUpdate,
 )
 from app.services import (
-    cfo_gatekeeper, convergence_service, margin_mask,
+    cfo_gatekeeper, convergence_service, evidence_bridge, margin_mask,
     risk_attribution, risk_heatmap,
 )
 
@@ -268,6 +268,57 @@ def heatmap(
             }
             for c in cells
         ],
+    }
+
+
+@router.get(
+    "/heatmap/cells/{activity_id}/evidence",
+    summary="Black Box evidence panel for a heatmap cell",
+    description=(
+        "Returns the communication trail (Black Box), a hashed audit trail "
+        "with per-row SHA-256 + a roll-up bundle hash, and a per-org "
+        "Subcontractor Scorecard. The CEO's heatmap UI calls this when a "
+        "cell is clicked so the recipient sees the full evidence chain "
+        "(emails, mentions, status changes) without leaving the page."
+    ),
+)
+def heatmap_evidence(
+    activity_id: str,
+    project_id: int = Query(...),
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(require_role(*list(TechnicalRole))),
+) -> dict:
+    bundle = evidence_bridge.build(db, project_id=project_id, activity_id=activity_id)
+
+    # Mask money in the scorecard if the viewer can't see DELAY_CLAIM_VALUE.
+    allowed = margin_mask.get_policy().fields_for(user.role)
+    show_money = FinancialField.DELAY_CLAIM_VALUE in allowed
+
+    def _row_for(s):
+        return {
+            "org": s.org,
+            "role": s.role,
+            "rfc_total": s.rfc_total,
+            "rfc_on_time": s.rfc_on_time,
+            "rfc_on_time_pct": s.rfc_on_time_pct,
+            "claim_count": s.claim_count,
+            "claim_gross_total": s.claim_gross_total if show_money else None,
+            "claim_net_total": s.claim_net_total if show_money else None,
+            "co_count": s.co_count,
+            "co_approved": s.co_approved,
+            "co_approval_pct": s.co_approval_pct,
+            "double_count_flagged": s.double_count_flagged,
+        }
+
+    return {
+        "project_id": bundle.project_id,
+        "activity_id": bundle.activity_id,
+        "generated_at": bundle.generated_at,
+        "bundle_hash": bundle.bundle_hash,
+        "communications": [c.__dict__ for c in bundle.communications],
+        "audit_trail": [a.__dict__ for a in bundle.audit_trail],
+        "scorecard": [_row_for(s) for s in bundle.scorecard],
+        "money_visible": show_money,
     }
 
 

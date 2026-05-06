@@ -78,7 +78,7 @@ export default function ExposurePage() {
       <table style={{ borderCollapse: "collapse", width: "100%" }}>
         <thead>
           <tr>
-            {["Activity", "Gross Claims", "Approved CO Recovery", "Net Exposure", "Claims", "COs", "Status"].map((h) => (
+            {["Activity", "Risk Impact", "Gross Claims", "Approved CO Recovery", "Net Exposure", "Claims", "COs", "Status"].map((h) => (
               <th key={h} style={th}>{h}</th>
             ))}
           </tr>
@@ -87,6 +87,13 @@ export default function ExposurePage() {
           {items.map((r) => (
             <tr key={r.activity_id} style={{ background: rowBg(r) }}>
               <td style={td}><code>{r.activity_id}</code></td>
+              <td style={td} title={r.risk_breakdown
+                ? `schedule ${(r.risk_breakdown.schedule * 100).toFixed(1)}%, rfc ${(r.risk_breakdown.rfc * 100).toFixed(1)}%, permit ${(r.risk_breakdown.permit * 100).toFixed(1)}%, idle ${(r.risk_breakdown.idle * 100).toFixed(1)}%`
+                : ""}>
+                <strong style={{ color: r.risk_impact >= 5 ? "#a31f1f" : "#333" }}>
+                  {r.risk_impact.toFixed(1)} pts
+                </strong>
+              </td>
               <td style={td}>{fmtMoney(r.gross_claim_impact)}</td>
               <td style={td}>{fmtMoney(r.approved_co_recovery)}</td>
               <td style={td}><strong>{fmtMoney(r.net_exposure)}</strong></td>

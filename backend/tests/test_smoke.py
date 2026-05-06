@@ -943,6 +943,129 @@ def test_heatmap_dwell_alert_dedup_within_24h():
     assert len(dwell) == 1, "dwell alert must dedupe within the cooldown window"
 
 
+# ---------- Phase 8: Evidence Bridge + Watchdog ----------------------------
+
+def test_evidence_bridge_returns_messages_audit_and_scorecard():
+    from app.models.messaging import Message, MessageThread
+    from app.services import evidence_bridge, wrap_risk
+
+    db = _fresh_db()
+
+    # Tag two messages — one to the activity directly, one to the RFC.
+    thread = MessageThread(project_id=1, subject="X-102")
+    db.add(thread); db.flush()
+    db.add_all([
+        Message(thread_id=thread.id, sender_email="pd@lead.epc",
+                sender_org="lead_epc", body="@civil_lead status?",
+                mentions=["civil_lead"], activity_id="CIV-1040"),
+        Message(thread_id=thread.id, sender_email="civil_lead@externalco.com",
+                sender_org="ExtCo", body="QA reviewing",
+                mentions=[], rfc_drawing_id=1),
+    ])
+    db.commit()
+
+    # Generate a claim against CIV-1040 driven by the RFC miss.
+    sim = wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=4, idle_crew=10, crew_burdened_rate=120.0,
+        linked_activity_id="CIV-1040",
+    )
+    # Approve a CO on the same activity so the scorecard is non-empty.
+    _make_approved_co(db, activity_id="CIV-1040", direct_cost=100_000.0,
+                      markup_pct=10.0)
+
+    bundle = evidence_bridge.build(db, project_id=1, activity_id="CIV-1040")
+
+    # Communications: both tagged messages must surface.
+    assert len(bundle.communications) >= 2
+    bodies = " ".join(c.body for c in bundle.communications)
+    assert "@civil_lead status?" in bodies
+    assert "QA reviewing" in bodies
+
+    # Audit trail covers claim + CO + idle event + CO events; each row hashed.
+    kinds = {a.kind for a in bundle.audit_trail}
+    assert "claim" in kinds
+    assert "change_order" in kinds
+    assert "idle_event" in kinds
+    for row in bundle.audit_trail:
+        assert len(row.sha256) == 64
+        assert row.canonical
+    assert len(bundle.bundle_hash) == 64
+
+    # Scorecard: counterparty (claim) + originator (CO) + issuer (RFC).
+    roles = {s.role for s in bundle.scorecard}
+    assert "counterparty" in roles
+    assert "originator" in roles
+    assert "issuer" in roles
+
+
+def test_evidence_bundle_hash_is_deterministic_and_changes_on_mutation():
+    from app.services import evidence_bridge, wrap_risk
+
+    db = _fresh_db()
+    wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=3, idle_crew=8, crew_burdened_rate=110.0,
+        linked_activity_id="CIV-1040",
+    )
+    a = evidence_bridge.build(db, project_id=1, activity_id="CIV-1040")
+    b = evidence_bridge.build(db, project_id=1, activity_id="CIV-1040")
+    assert a.bundle_hash == b.bundle_hash, \
+        "back-to-back builds must produce the same audit-trail hash"
+
+    _make_approved_co(db, activity_id="CIV-1040", direct_cost=100_000.0,
+                      markup_pct=20.0)
+    c = evidence_bridge.build(db, project_id=1, activity_id="CIV-1040")
+    assert c.bundle_hash != a.bundle_hash, \
+        "approving a CO must change the audit-trail hash"
+
+
+def test_watchdog_run_once_invokes_heatmap_evaluation_per_project():
+    from datetime import datetime, timedelta, timezone as _tz
+    import asyncio
+
+    from app.connectors import twilio_sns
+    from app.models.heatmap import HeatmapPosition
+    from app.models.notification import Notification
+    from app.services import wrap_risk
+
+    twilio_sns.SENT.clear()
+    db = _fresh_db()
+    _seed_recipients(db)
+
+    # Push CIV-1040 into HH on the project.
+    wrap_risk.simulate_rfc_miss(
+        db, project_id=1, rfc_drawing_id=1,
+        days_overdue=14, idle_crew=30, crew_burdened_rate=200.0,
+        linked_activity_id="CIV-1040",
+    )
+
+    # Patch the watchdog's SessionLocal to point at our fresh in-memory db,
+    # then pre-age the heatmap position so the dwell trigger fires.
+    from app.services import watchdog as wd
+    original = wd.SessionLocal
+    try:
+        wd.SessionLocal = lambda: db  # type: ignore[assignment]
+        # First tick seeds HeatmapPosition rows.
+        scanned = asyncio.run(wd.run_once())
+        assert scanned == 1
+        pos = (db.query(HeatmapPosition)
+                 .filter(HeatmapPosition.activity_id == "CIV-1040").first())
+        assert pos is not None
+        # Pre-age and re-tick so the dwell threshold trips.
+        pos.entered_at = datetime.now(_tz.utc) - timedelta(hours=49)
+        db.commit()
+        twilio_sns.SENT.clear()
+        asyncio.run(wd.run_once())
+    finally:
+        wd.SessionLocal = original
+
+    dwell = (db.query(Notification)
+               .filter(Notification.trigger.like("heatmap_dwell:%")).all())
+    assert dwell, "watchdog tick must fire the dwell alert"
+    assert "+15555550103" in {m["to"] for m in twilio_sns.SENT}
+
+
 def test_management_comment_persisted_for_idle_event():
     from app.models.comment import ManagementComment
     from app.models.risk import DelayClaim
