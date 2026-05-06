@@ -26,6 +26,11 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:3000"
 
+    # Heatmap dwell-time watchdog. Default cadence 30 minutes; tests can
+    # set to 0 to keep the loop dormant.
+    watchdog_enabled: bool = True
+    watchdog_interval_seconds: int = 1800
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

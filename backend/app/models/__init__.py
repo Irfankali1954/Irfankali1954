@@ -22,3 +22,4 @@ from app.models.messaging import Message, MessageThread  # noqa: F401
 from app.models.notification import Notification, NotificationRecipient  # noqa: F401
 from app.models.comment import ManagementComment  # noqa: F401
 from app.models.change_order import ChangeOrder, ChangeOrderEvent  # noqa: F401
+from app.models.heatmap import HeatmapPosition  # noqa: F401

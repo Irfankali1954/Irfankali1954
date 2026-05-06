@@ -302,6 +302,84 @@ export const api = {
       `/cfo/net-exposure/reconcile?project_id=${projectId}`,
       { method: "POST" },
     ),
+
+  // Heatmap (Phase 8)
+  heatmap: (projectId: number, fireAlerts = false) =>
+    req<HeatmapReport>(
+      `/cfo/heatmap?project_id=${projectId}&fire_alerts=${fireAlerts}`,
+    ),
+
+  cellEvidence: (projectId: number, activityId: string) =>
+    req<EvidenceBundle>(
+      `/cfo/heatmap/cells/${encodeURIComponent(activityId)}/evidence?project_id=${projectId}`,
+    ),
+
+  // Reverse de-risk (Phase 8)
+  rejectCO: (id: number) =>
+    req<ChangeOrderRow>(`/change-orders/${id}/reject`, { method: "POST" }),
+  withdrawCO: (id: number) =>
+    req<ChangeOrderRow>(`/change-orders/${id}/withdraw`, { method: "POST" }),
+};
+
+export type HeatmapCell = {
+  activity_id: string;
+  risk_impact: number;
+  net_exposure: number | null;
+  quadrant: "HH" | "HL" | "LH" | "LL";
+  entered_at: string;
+  hours_in_quadrant: number;
+  claim_ids: number[];
+  change_order_ids: number[];
+};
+
+export type HeatmapReport = {
+  project_id: number;
+  thresholds: {
+    high_risk_score_points: number;
+    high_exposure_dollars: number;
+    dwell_hours_nuclear: number;
+  };
+  cells: HeatmapCell[];
+};
+
+export type EvidenceBundle = {
+  project_id: number;
+  activity_id: string;
+  generated_at: string;
+  bundle_hash: string;
+  communications: Array<{
+    timestamp: string;
+    sender_email: string;
+    sender_org: string;
+    body: string;
+    activity_id: string | null;
+    rfc_drawing_id: number | null;
+    permit_id: number | null;
+    mentions: string[];
+  }>;
+  audit_trail: Array<{
+    kind: string;
+    id: number;
+    occurred_at: string;
+    actor: string | null;
+    canonical: string;
+    sha256: string;
+  }>;
+  scorecard: Array<{
+    org: string;
+    role: string;
+    rfc_total: number;
+    rfc_on_time: number;
+    rfc_on_time_pct: number;
+    claim_count: number;
+    claim_gross_total: number | null;
+    claim_net_total: number | null;
+    co_count: number;
+    co_approved: number;
+    co_approval_pct: number;
+    double_count_flagged: number;
+  }>;
+  money_visible: boolean;
 };
 
 export type ExposureRow = {
@@ -309,6 +387,13 @@ export type ExposureRow = {
   gross_claim_impact: number | null;
   approved_co_recovery: number | null;
   net_exposure: number | null;
+  risk_impact: number;
+  risk_breakdown: {
+    schedule: number;
+    rfc: number;
+    permit: number;
+    idle: number;
+  } | null;
   claim_ids: number[];
   change_order_ids: number[];
   double_count_risk: boolean;

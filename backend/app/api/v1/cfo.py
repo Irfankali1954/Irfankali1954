@@ -30,7 +30,10 @@ from app.schemas.financial import (
     ProjectFinancialSummary,
     VisibilityPolicyUpdate,
 )
-from app.services import cfo_gatekeeper, convergence_service, margin_mask
+from app.services import (
+    cfo_gatekeeper, convergence_service, evidence_bridge, margin_mask,
+    risk_attribution, risk_heatmap,
+)
 
 router = APIRouter()
 
@@ -158,25 +161,55 @@ def net_exposure(
     user: CurrentUser = Depends(require_role(*list(TechnicalRole))),
 ) -> dict:
     rows = convergence_service.compute_for_project(db, project_id)
+    attribs = {a.activity_id: a for a in risk_attribution.attribute_for_project(db, project_id)}
     allowed = margin_mask.get_policy().fields_for(user.role)
     show_money = FinancialField.DELAY_CLAIM_VALUE in allowed
 
     def _m(v: float) -> float | None:
         return v if show_money else None
 
-    items = [
-        {
+    items = []
+    for r in rows:
+        attr = attribs.get(r.activity_id)
+        items.append({
             "activity_id": r.activity_id,
             "gross_claim_impact": _m(r.gross_claim_impact),
             "approved_co_recovery": _m(r.approved_co_recovery),
             "net_exposure": _m(r.net_exposure),
+            "risk_impact": attr.risk_impact if attr else 0.0,
+            "risk_breakdown": {
+                "schedule": attr.schedule_loss if attr else 0.0,
+                "rfc": attr.rfc_loss if attr else 0.0,
+                "permit": attr.permit_loss if attr else 0.0,
+                "idle": attr.idle_loss if attr else 0.0,
+            } if attr else None,
             "claim_ids": r.claim_ids,
             "change_order_ids": r.change_order_ids,
             "double_count_risk": r.double_count_risk,
             "fully_de_risked": r.fully_de_risked,
-        }
-        for r in rows
-    ]
+        })
+    # Activities with risk impact but no exposure (off-claim/off-CO drag)
+    seen = {r.activity_id for r in rows}
+    for aid, attr in attribs.items():
+        if aid in seen or attr.risk_impact <= 0:
+            continue
+        items.append({
+            "activity_id": aid,
+            "gross_claim_impact": _m(0.0),
+            "approved_co_recovery": _m(0.0),
+            "net_exposure": _m(0.0),
+            "risk_impact": attr.risk_impact,
+            "risk_breakdown": {
+                "schedule": attr.schedule_loss,
+                "rfc": attr.rfc_loss,
+                "permit": attr.permit_loss,
+                "idle": attr.idle_loss,
+            },
+            "claim_ids": [],
+            "change_order_ids": [],
+            "double_count_risk": False,
+            "fully_de_risked": False,
+        })
     totals = {
         "gross_claim_impact": _m(sum(r.gross_claim_impact for r in rows)),
         "approved_co_recovery": _m(sum(r.approved_co_recovery for r in rows)),
@@ -188,6 +221,103 @@ def net_exposure(
         "items": items,
         "totals": totals,
         "viewer_role": user.role.value,
+        "money_visible": show_money,
+    }
+
+
+@router.get(
+    "/heatmap",
+    summary="CEO Heatmap — Risk Impact × Net Exposure quadrants",
+    description=(
+        "Returns one cell per activity carrying risk or exposure, plus the "
+        "thresholds used to bucket each cell. Activities sitting in HH "
+        "(high risk + high exposure) for ≥ 48 hours auto-fire a Tier-3 "
+        "nuclear notification when this endpoint runs in alert mode."
+    ),
+)
+def heatmap(
+    project_id: int = Query(...),
+    fire_alerts: bool = Query(True),
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(require_role(*list(TechnicalRole))),
+) -> dict:
+    cells = risk_heatmap.evaluate(db, project_id, fire_alerts=fire_alerts)
+    allowed = margin_mask.get_policy().fields_for(user.role)
+    show_money = FinancialField.DELAY_CLAIM_VALUE in allowed
+
+    def _m(v: float) -> float | None:
+        return v if show_money else None
+
+    return {
+        "project_id": project_id,
+        "thresholds": {
+            "high_risk_score_points": risk_heatmap.HIGH_RISK_THRESHOLD,
+            "high_exposure_dollars": risk_heatmap.HIGH_EXPOSURE_THRESHOLD,
+            "dwell_hours_nuclear": risk_heatmap.DWELL_HOURS_NUCLEAR,
+        },
+        "cells": [
+            {
+                "activity_id": c.activity_id,
+                "risk_impact": c.risk_impact,
+                "net_exposure": _m(c.net_exposure),
+                "quadrant": c.quadrant,
+                "entered_at": c.entered_at.isoformat(),
+                "hours_in_quadrant": round(c.hours_in_quadrant, 2),
+                "claim_ids": c.claim_ids,
+                "change_order_ids": c.change_order_ids,
+            }
+            for c in cells
+        ],
+    }
+
+
+@router.get(
+    "/heatmap/cells/{activity_id}/evidence",
+    summary="Black Box evidence panel for a heatmap cell",
+    description=(
+        "Returns the communication trail (Black Box), a hashed audit trail "
+        "with per-row SHA-256 + a roll-up bundle hash, and a per-org "
+        "Subcontractor Scorecard. The CEO's heatmap UI calls this when a "
+        "cell is clicked so the recipient sees the full evidence chain "
+        "(emails, mentions, status changes) without leaving the page."
+    ),
+)
+def heatmap_evidence(
+    activity_id: str,
+    project_id: int = Query(...),
+    db: Session = Depends(db_session),
+    user: CurrentUser = Depends(require_role(*list(TechnicalRole))),
+) -> dict:
+    bundle = evidence_bridge.build(db, project_id=project_id, activity_id=activity_id)
+
+    # Mask money in the scorecard if the viewer can't see DELAY_CLAIM_VALUE.
+    allowed = margin_mask.get_policy().fields_for(user.role)
+    show_money = FinancialField.DELAY_CLAIM_VALUE in allowed
+
+    def _row_for(s):
+        return {
+            "org": s.org,
+            "role": s.role,
+            "rfc_total": s.rfc_total,
+            "rfc_on_time": s.rfc_on_time,
+            "rfc_on_time_pct": s.rfc_on_time_pct,
+            "claim_count": s.claim_count,
+            "claim_gross_total": s.claim_gross_total if show_money else None,
+            "claim_net_total": s.claim_net_total if show_money else None,
+            "co_count": s.co_count,
+            "co_approved": s.co_approved,
+            "co_approval_pct": s.co_approval_pct,
+            "double_count_flagged": s.double_count_flagged,
+        }
+
+    return {
+        "project_id": bundle.project_id,
+        "activity_id": bundle.activity_id,
+        "generated_at": bundle.generated_at,
+        "bundle_hash": bundle.bundle_hash,
+        "communications": [c.__dict__ for c in bundle.communications],
+        "audit_trail": [a.__dict__ for a in bundle.audit_trail],
+        "scorecard": [_row_for(s) for s in bundle.scorecard],
         "money_visible": show_money,
     }
 
