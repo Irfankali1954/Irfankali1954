@@ -10,6 +10,16 @@ from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.db.session import Base, engine
 
+# Surface our own loggers (notably ``app.services.watchdog``) in the
+# uvicorn console. ``force=True`` is required because uvicorn's logging
+# config sets handlers on the root logger before our app module is
+# imported; without it, basicConfig is a no-op.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    force=True,
+)
+
 log = logging.getLogger(__name__)
 settings = get_settings()
 
