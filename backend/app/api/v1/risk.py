@@ -183,13 +183,37 @@ def seed_demo(project_id: int, db: Session = Depends(db_session)) -> dict:
         ])
     db.commit()
 
+    # Run an initial CPM recompute so the schedule factor + risk
+    # attribution have something to chew on. Without this, the wrap risk
+    # engine falls back to the neutral 0.5 schedule factor and the
+    # simulation buttons produce muted results.
+    from app.services import critical_path, wrap_risk
+    cpm_ok = False
+    try:
+        critical_path.recompute(db, project_id, trigger="seed_demo")
+        cpm_ok = True
+    except Exception:  # pragma: no cover
+        pass
+
+    # Seed an initial wrap-score snapshot too — gives the dashboards a
+    # value to render the moment the demo loads, without needing to call
+    # /wrap-score/recompute manually.
+    try:
+        wrap_risk.compute(db, project_id, notes="seed_demo")
+    except Exception:  # pragma: no cover
+        pass
+
     rfcs = db.query(RFCDrawing).filter(RFCDrawing.project_id == project_id).all()
     permits = db.query(PermitStatus).filter(PermitStatus.project_id == project_id).all()
+    activities = db.query(ScheduleActivity).filter(ScheduleActivity.project_id == project_id).all()
     return {
         "project_id": project_id,
         "rfc_drawings": [{"id": r.id, "drawing_no": r.drawing_no, "rfc_due": r.rfc_due.isoformat()} for r in rfcs],
         "permits": [{"id": p.id, "permit_type": p.permit_type, "authority": p.authority,
                      "target_date": p.target_date.isoformat(), "status": p.status} for p in permits],
+        "activities": [{"activity_id": a.activity_id, "name": a.name, "is_critical": a.is_critical}
+                       for a in activities],
+        "cpm_recomputed": cpm_ok,
     }
 
 

@@ -30,6 +30,15 @@ async def lifespan(app: FastAPI):
     import app.models  # noqa: F401
     Base.metadata.create_all(bind=engine)
 
+    # First-boot admin bootstrap (env-driven). No-op when env vars unset.
+    from app.db.session import SessionLocal
+    from app.services.bootstrap import bootstrap_admin
+    _db = SessionLocal()
+    try:
+        bootstrap_admin(_db, settings)
+    finally:
+        _db.close()
+
     # Heatmap dwell-time watchdog runs as a single background task. It
     # iterates every project on a configurable cadence (default 30 min)
     # and asks risk_heatmap.evaluate to re-classify cells and fire any

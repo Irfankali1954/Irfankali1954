@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     watchdog_enabled: bool = True
     watchdog_interval_seconds: int = 1800
 
+    # First-boot admin bootstrap. Both must be set for the bootstrap to
+    # run; production deployments leave these unset and create users via
+    # the API once the first admin exists.
+    bootstrap_admin_email: str | None = None
+    bootstrap_admin_password: str | None = None
+    bootstrap_admin_name: str = "Bootstrap Admin"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

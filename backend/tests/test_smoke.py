@@ -1066,6 +1066,195 @@ def test_watchdog_run_once_invokes_heatmap_evaluation_per_project():
     assert "+15555550103" in {m["to"] for m in twilio_sns.SENT}
 
 
+# ---------- Demo flow integration (bootstrap → login → seed → simulate) -----
+
+def test_bootstrap_admin_is_idempotent_and_no_op_when_unset(tmp_path):
+    """The bootstrap creates the admin once and is a no-op on every subsequent
+    boot. Without env creds, it does nothing at all."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.core.config import Settings
+    from app.db.session import Base
+    import app.models  # noqa: F401
+    from app.models.user import User
+    from app.services.bootstrap import bootstrap_admin
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'b.sqlite'}",
+                           connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+
+    # Disabled — no env creds.
+    assert bootstrap_admin(db, Settings()) is None
+    assert db.query(User).count() == 0
+
+    # Enabled — first call creates.
+    s = Settings(bootstrap_admin_email="admin@x", bootstrap_admin_password="pw")
+    user1 = bootstrap_admin(db, s)
+    assert user1 is not None and user1.role.value == "admin"
+    assert db.query(User).count() == 1
+
+    # Idempotent — second call returns the same row, does not duplicate.
+    user2 = bootstrap_admin(db, s)
+    assert user2 is not None and user2.id == user1.id
+    assert db.query(User).count() == 1
+
+
+def test_demo_flow_end_to_end(tmp_path):
+    """Full HTTP path: bootstrap → login → seed-demo → simulate.
+
+    Uses FastAPI's dependency-override pattern (the canonical FastAPI
+    test approach) so the test runs against an isolated SQLite without
+    rewiring module imports.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from fastapi.testclient import TestClient
+
+    from app.api.deps import db_session
+    from app.core.config import Settings
+    from app.db.session import Base
+    import app.models  # noqa: F401
+    from app.main import app
+    from app.services.bootstrap import bootstrap_admin
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'demo.sqlite'}",
+                           connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    LocalSession = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+    # Bootstrap an admin in the test DB.
+    s = Settings(
+        bootstrap_admin_email="demo-admin@example.com",
+        bootstrap_admin_password="demo12345",
+        watchdog_enabled=False,
+        jwt_secret="test-secret",
+    )
+    seed_db = LocalSession()
+    bootstrap_admin(seed_db, s)
+    seed_db.close()
+
+    def _override_db():
+        s = LocalSession()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app.dependency_overrides[db_session] = _override_db
+
+    try:
+        # Don't use TestClient as context-manager — that triggers lifespan,
+        # which would create tables on the *real* engine and would also
+        # spin up the watchdog. We've already prepared the test DB above.
+        client = TestClient(app)
+
+        # 1. Login with the bootstrap admin.
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"email": "demo-admin@example.com", "password": "demo12345"},
+        )
+        assert login.status_code == 200, login.text
+        token = login.json()["access_token"]
+        auth = {"Authorization": f"Bearer {token}"}
+
+        # 2. seed-demo creates the full dataset and recomputes CPM.
+        seed = client.post("/api/v1/risk/projects/1/seed-demo", headers=auth)
+        assert seed.status_code == 200, seed.text
+        payload = seed.json()
+        assert payload["project_id"] == 1
+        assert {r["drawing_no"] for r in payload["rfc_drawings"]} == {"X-102", "E-310"}
+        assert len(payload["permits"]) == 2
+        assert len(payload["activities"]) == 2
+        assert payload["cpm_recomputed"] is True
+
+        # 3. CPM snapshot exists with at least one critical activity.
+        cpm = client.get("/api/v1/scheduler/projects/1/cpm/last", headers=auth)
+        assert cpm.status_code == 200, cpm.text
+        assert cpm.json()["critical_activity_ids"]
+
+        # 4. Initial wrap-score snapshot exists.
+        ws = client.get("/api/v1/risk/projects/1/wrap-score", headers=auth)
+        assert ws.status_code == 200, ws.text
+        assert 0 < ws.json()["score"] <= 100
+
+        # 5. Simulate RFC miss — score drops, claim auto-drafts.
+        rfc_id = payload["rfc_drawings"][0]["id"]
+        sim = client.post(
+            "/api/v1/risk/projects/1/simulate-rfc-miss",
+            headers=auth,
+            json={
+                "rfc_drawing_id": rfc_id,
+                "days_overdue": 10,
+                "idle_crew": 20,
+                "crew_burdened_rate": 140.0,
+                "linked_activity_id": "CIV-1040",
+            },
+        )
+        assert sim.status_code == 200, sim.text
+        sb = sim.json()
+        assert sb["after_score"] < sb["before_score"]
+        assert sb["delta"] < 0
+        assert sb["claim_id"] is not None
+        assert sb["approval_id"] is not None
+        # Admin role does NOT have FIELD_IDLE_COST in the default
+        # Visibility Policy — that's the two-axis RBAC working. The
+        # masked None is the correct behavior; verify the underlying
+        # IdleEvent row carries the real cost.
+        assert sb["idle_cost"] is None
+        from app.models.risk import IdleEvent
+        verify = LocalSession()
+        try:
+            evt = verify.query(IdleEvent).filter(
+                IdleEvent.project_id == 1
+            ).order_by(IdleEvent.id.desc()).first()
+            assert evt is not None and float(evt.computed_cost or 0) > 0
+        finally:
+            verify.close()
+
+        # 6. The auto-drafted claim carries the activity link + a SoF.
+        claim = client.get(f"/api/v1/claims/{sb['claim_id']}", headers=auth)
+        assert claim.status_code == 200, claim.text
+        cdata = claim.json()
+        assert cdata["linked_activity_id"] == "CIV-1040"
+        assert "STATEMENT OF FACTS" in (cdata["statement_of_facts"] or "")
+
+        # 7. Heatmap classifies CIV-1040 with non-zero risk impact.
+        hm = client.get(
+            "/api/v1/cfo/heatmap?project_id=1&fire_alerts=false",
+            headers=auth,
+        )
+        assert hm.status_code == 200, hm.text
+        civ = next(
+            (c for c in hm.json()["cells"] if c["activity_id"] == "CIV-1040"),
+            None,
+        )
+        assert civ is not None
+        assert civ["risk_impact"] > 0
+
+        # 8. seed-demo is idempotent — second POST must not duplicate rows.
+        again = client.post("/api/v1/risk/projects/1/seed-demo", headers=auth)
+        assert again.status_code == 200
+        assert len(again.json()["rfc_drawings"]) == 2
+
+        # 9. Permit-delay sibling endpoint works against the seeded data too.
+        permit_id = payload["permits"][0]["id"]
+        psim = client.post(
+            "/api/v1/risk/projects/1/simulate-permit-delay",
+            headers=auth,
+            json={
+                "permit_id": permit_id, "days_overdue": 7,
+                "idle_crew": 15, "crew_burdened_rate": 130.0,
+                "linked_activity_id": "MEC-2010",
+            },
+        )
+        assert psim.status_code == 200, psim.text
+        assert psim.json()["claim_id"] is not None
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_management_comment_persisted_for_idle_event():
     from app.models.comment import ManagementComment
     from app.models.risk import DelayClaim
